@@ -1,9 +1,11 @@
 import asyncio, time, math
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from stario import Stario, Span, Context, Writer, data
 from stario.html import Html, Head, Meta, Title, Script, Style, Link, Body, Div, P, Button, Input, Span as HSpan, Small, A, Nav
 from stario.relay import Relay
 
+TZ = ZoneInfo("America/Chicago")
 relay = Relay()
 timer = dict(mins=5, end=0, running=False, paused=False, paused_rem=0)
 sw = dict(start=0, running=False, paused=False, paused_elapsed=0)
@@ -46,9 +48,9 @@ def make_svg(hour, minute, second=0, mode="time", frac=None, sz=16, font="'Couri
 
 
 def clock_sigs():
-    now = datetime.now()
+    now = datetime.now(TZ)
     h12, ampm = to12(now.hour)
-    return dict(favSvg=make_svg(now.hour, now.minute), favMeta=f"live · {h12}:{now.minute:02d} {ampm}")
+    return dict(favSvg=make_svg(now.hour, now.minute), favMeta=f"{h12}:{now.minute:02d} {ampm}")
 
 def timer_sigs():
     if timer["running"]:
@@ -68,8 +70,7 @@ def sw_sigs():
         mm, ss = divmod(elapsed, 60)
         return dict(favSvg=make_svg(mm, ss, ss, mode="stopwatch"), favMeta=f"{mm:02d}:{ss:02d} elapsed")
     if sw["paused_elapsed"] > 0:
-        elapsed = int(sw["paused_elapsed"])
-        mm, ss = divmod(elapsed, 60)
+        mm, ss = divmod(int(sw["paused_elapsed"]), 60)
         return dict(favSvg=make_svg(mm, ss, ss, mode="stopwatch"), favMeta=f"paused · {mm:02d}:{ss:02d}")
     return dict(favSvg=make_svg(0, 0, 0, mode="stopwatch"), favMeta="00:00 · ready")
 
@@ -77,61 +78,55 @@ def sw_sigs():
 def cmd_timer_start():
     total = timer["paused_rem"] if timer["paused_rem"] > 0 else timer["mins"] * 60
     timer.update(dict(end=time.monotonic() + total, running=True, paused=False, paused_rem=0))
-    relay.publish("timer.start", None)
+    relay.publish("timer.changed", None)
 
 def cmd_timer_pause():
     if not timer["running"]: return
     timer.update(dict(paused_rem=max(0, int(timer["end"] - time.monotonic())), running=False, paused=True))
-    relay.publish("timer.pause", None)
+    relay.publish("timer.changed", None)
 
 def cmd_timer_reset():
     timer.update(dict(end=0, running=False, paused=False, paused_rem=0))
-    relay.publish("timer.reset", None)
+    relay.publish("timer.changed", None)
 
 def cmd_timer_duration(h, m):
     timer.update(dict(mins=h * 60 + m, paused_rem=0, running=False, paused=False, end=0))
-    relay.publish("timer.duration", None)
+    relay.publish("timer.changed", None)
 
 def cmd_sw_start():
     sw.update(dict(start=time.monotonic() - sw["paused_elapsed"], running=True, paused=False, paused_elapsed=0))
-    relay.publish("sw.start", None)
+    relay.publish("sw.changed", None)
 
 def cmd_sw_pause():
     if not sw["running"]: return
     sw.update(dict(paused_elapsed=time.monotonic() - sw["start"], running=False, paused=True))
-    relay.publish("sw.pause", None)
+    relay.publish("sw.changed", None)
 
 def cmd_sw_reset():
     sw.update(dict(start=0, running=False, paused=False, paused_elapsed=0))
-    relay.publish("sw.reset", None)
+    relay.publish("sw.changed", None)
 
 
 async def _clock_loop(w):
     last_min = -1
     async for _ in w.alive():
-        now = datetime.now()
+        now = datetime.now(TZ)
         if now.minute != last_min:
             last_min = now.minute
             w.sync(clock_sigs())
         await asyncio.sleep(1)
 
 async def _timer_loop(w):
-    w.sync(timer_sigs())
     async for _ in w.alive():
         if timer["running"] and timer["end"] - time.monotonic() <= 0:
             timer.update(dict(running=False))
-            relay.publish("timer.expired", None)
-            w.sync(dict(favSvg=make_svg(0, 0, 0, mode="countdown"), favMeta="done!"))
-            return
+            relay.publish("timer.changed", None)
         w.sync(timer_sigs())
-        if not timer["running"]: return
         await asyncio.sleep(1)
 
 async def _sw_loop(w):
-    w.sync(sw_sigs())
     async for _ in w.alive():
         w.sync(sw_sigs())
-        if not sw["running"]: return
         await asyncio.sleep(1)
 
 
@@ -179,16 +174,16 @@ def shell(*children, title="Clock", active="clock", sigs=None):
 
 def clock_view():
     return shell(
-        Div({"class": "face"}, data.effect("el.innerHTML = $favSvg")),
+        Div({"class": "face"}, data.effect("el.innerHTML = $favSvg"),
+            data.init("@get('/clock/stream', {openWhenHidden: true})")),
         P({"class": "meta"}, data.text("$favMeta")),
-        Div({"class": "controls"}, Button(data.on("click", "@get('/clock/stream', {openWhenHidden: true})"), "Start")),
         active="clock", title="Clock", sigs=clock_sigs())
 
 def timer_view():
-    auto = data.init("@get('/timer/stream', {openWhenHidden: true})") if timer["running"] else ""
     hrs, mins = timer["mins"] // 60, timer["mins"] % 60
     return shell(
-        Div({"class": "face"}, data.effect("el.innerHTML = $favSvg"), auto),
+        Div({"class": "face"}, data.effect("el.innerHTML = $favSvg"),
+            data.init("@get('/timer/stream', {openWhenHidden: true})")),
         P({"class": "meta"}, data.text("$favMeta")),
         Div({"class": "controls"},
             Input({"type": "number", "min": "0", "max": "99", "value": str(hrs), "id": "timer-hrs", "style": "width:4rem",
@@ -197,18 +192,18 @@ def timer_view():
             Input({"type": "number", "min": "0", "max": "59", "value": str(mins), "id": "timer-mins", "style": "width:4rem",
                    "data-on:change": "@post('/timer/duration?h=' + document.querySelector('#timer-hrs').value + '&m=' + el.value)"}),
             Small({"style": "color:#666"}, "min"),
-            Button(data.on("click", "@get('/timer/start', {openWhenHidden: true})"), "Start"),
+            Button(data.on("click", "@post('/timer/start')"), "Start"),
             Button(data.on("click", "@post('/timer/pause')"), "Pause"),
             Button(data.on("click", "@post('/timer/reset')"), "Reset")),
         active="timer", title="Timer", sigs=timer_sigs())
 
 def sw_view():
-    auto = data.init("@get('/stopwatch/stream', {openWhenHidden: true})") if sw["running"] else ""
     return shell(
-        Div({"class": "face"}, data.effect("el.innerHTML = $favSvg"), auto),
+        Div({"class": "face"}, data.effect("el.innerHTML = $favSvg"),
+            data.init("@get('/stopwatch/stream', {openWhenHidden: true})")),
         P({"class": "meta"}, data.text("$favMeta")),
         Div({"class": "controls"},
-            Button(data.on("click", "@get('/stopwatch/start', {openWhenHidden: true})"), "Start"),
+            Button(data.on("click", "@post('/stopwatch/start')"), "Start"),
             Button(data.on("click", "@post('/stopwatch/pause')"), "Pause"),
             Button(data.on("click", "@post('/stopwatch/reset')"), "Reset")),
         active="stopwatch", title="Stopwatch", sigs=sw_sigs())
@@ -223,7 +218,7 @@ async def h_sw_stream(c: Context, w: Writer): await _sw_loop(w)
 
 async def h_timer_start(c: Context, w: Writer):
     cmd_timer_start()
-    await _timer_loop(w)
+    w.sync(timer_sigs())
 
 async def h_timer_pause(c: Context, w: Writer):
     cmd_timer_pause()
@@ -241,7 +236,7 @@ async def h_timer_duration(c: Context, w: Writer):
 
 async def h_sw_start(c: Context, w: Writer):
     cmd_sw_start()
-    await _sw_loop(w)
+    w.sync(sw_sigs())
 
 async def h_sw_pause(c: Context, w: Writer):
     cmd_sw_pause()
@@ -253,17 +248,16 @@ async def h_sw_reset(c: Context, w: Writer):
 
 
 async def bootstrap(app: Stario, span: Span):
-    "Register all routes"
     app.get("/", h_home)
     app.get("/timer", h_timer)
     app.get("/stopwatch", h_sw)
     app.get("/clock/stream", h_clock_stream)
-    app.get("/timer/start", h_timer_start)
     app.get("/timer/stream", h_timer_stream)
+    app.get("/stopwatch/stream", h_sw_stream)
+    app.post("/timer/start", h_timer_start)
     app.post("/timer/pause", h_timer_pause)
     app.post("/timer/reset", h_timer_reset)
     app.post("/timer/duration", h_timer_duration)
-    app.get("/stopwatch/start", h_sw_start)
-    app.get("/stopwatch/stream", h_sw_stream)
+    app.post("/stopwatch/start", h_sw_start)
     app.post("/stopwatch/pause", h_sw_pause)
     app.post("/stopwatch/reset", h_sw_reset)
