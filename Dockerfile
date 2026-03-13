@@ -15,4 +15,4 @@ RUN uv sync --no-dev --frozen
 COPY . .
 
 # Run the app
-CMD ["uv", "run", "main.py"]
+CMD ["uv", "run", "stario", "serve", "main:bootstrap"]
