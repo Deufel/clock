@@ -28,7 +28,11 @@ input[type=number] { padding: 0.6rem; border-radius: 0.5rem; border: 1px solid #
 input:focus { outline: 2px solid #e54; outline-offset: 2px; }
 """
 
-state = dict(countdownMins=5, timerPaused=False, timerPausedRemaining=0)
+state = dict(
+    countdownMins=5, timerPaused=False, timerPausedRemaining=0,
+    timerEnd=0, timerRunning=False,
+    swStart=0, swRunning=False, swPaused=False, swPausedElapsed=0
+)
 
 R, CIRC = 206, 2 * math.pi * 206
 
@@ -106,12 +110,25 @@ def clock_page():
 
 
 def timer_page():
-    total = state["countdownMins"] * 60
-    top, bot, meta = fmt_timer(total)
-    svg = make_svg(top, bot, 0, mode="countdown")
+    if state["timerRunning"]:
+        remaining = max(0, int(state["timerEnd"] - time.monotonic()))
+        top, bot, meta = fmt_timer(remaining)
+        svg = make_svg(top, bot, bot, mode="countdown", frac_override=bot/60.0)
+        auto_start = data.init("@get('/timer/start', {openWhenHidden: true})")
+    elif state["timerPausedRemaining"] > 0:
+        top, bot, meta = fmt_timer(state["timerPausedRemaining"])
+        svg = make_svg(top, bot, bot, mode="countdown", frac_override=bot/60.0)
+        meta = f"paused · {meta.split(' ')[0]}"
+        auto_start = ""
+    else:
+        total = state["countdownMins"] * 60
+        top, bot, meta = fmt_timer(total)
+        svg = make_svg(top, bot, 0, mode="countdown")
+        meta = meta.replace("remaining", "· ready")
+        auto_start = ""
     hrs, mins = state["countdownMins"] // 60, state["countdownMins"] % 60
     return shell(
-        Div({"class": "face"}, data.effect("el.innerHTML = $favSvg")),
+        Div({"class": "face"}, data.effect("el.innerHTML = $favSvg"), auto_start),
         P({"class": "meta"}, data.text("$favMeta")),
         Div({"class": "controls"},
             Input({"type": "number", "min": "0", "max": "99", "value": str(hrs), "id": "timer-hrs", "style": "width:4rem", "data-on:change": "@post('/timer/duration?h=' + el.value + '&m=' + document.querySelector('#timer-mins').value)"}),
@@ -121,18 +138,33 @@ def timer_page():
             Button(data.on("click", "@get('/timer/start', {openWhenHidden: true})"), "Start"),
             Button(data.on("click", "@post('/timer/pause')"), "Pause"),
             Button(data.on("click", "@post('/timer/reset')"), "Reset")),
-        active="timer", title="Timer", init_svg=svg, init_meta=meta.replace("remaining", "· ready"))
+        active="timer", title="Timer", init_svg=svg, init_meta=meta)
 
 def stopwatch_page():
-    svg = make_svg(0, 0, 0, mode="stopwatch")
+    if state["swRunning"]:
+        elapsed = int(time.monotonic() - state["swStart"])
+        mm, ss = divmod(elapsed, 60)
+        svg = make_svg(mm, ss, ss, mode="stopwatch")
+        meta = f"{mm:02d}:{ss:02d} elapsed"
+        auto_start = data.init("@get('/stopwatch/start', {openWhenHidden: true})")
+    elif state["swPausedElapsed"] > 0:
+        elapsed = int(state["swPausedElapsed"])
+        mm, ss = divmod(elapsed, 60)
+        svg = make_svg(mm, ss, ss, mode="stopwatch")
+        meta = f"paused · {mm:02d}:{ss:02d}"
+        auto_start = ""
+    else:
+        svg = make_svg(0, 0, 0, mode="stopwatch")
+        meta = "00:00 · ready"
+        auto_start = ""
     return shell(
-        Div({"class": "face"}, data.effect("el.innerHTML = $favSvg")),
+        Div({"class": "face"}, data.effect("el.innerHTML = $favSvg"), auto_start),
         P({"class": "meta"}, data.text("$favMeta")),
         Div({"class": "controls"},
             Button(data.on("click", "@get('/stopwatch/start', {openWhenHidden: true})"), "Start"),
             Button(data.on("click", "@post('/stopwatch/pause')"), "Pause"),
             Button(data.on("click", "@post('/stopwatch/reset')"), "Reset")),
-        active="stopwatch", title="Stopwatch", init_svg=svg, init_meta="00:00 · ready")
+        active="stopwatch", title="Stopwatch", init_svg=svg, init_meta=meta)
 
 async def timer_duration(c: Context, w: Writer):
     h = max(0, min(99, int(c.req.query.get("h", "0"))))
@@ -147,23 +179,27 @@ async def timer_start(c: Context, w: Writer):
     state["timerPaused"] = False
     if state["timerPausedRemaining"] > 0: total = state["timerPausedRemaining"]
     else: total = state["countdownMins"] * 60
-    end = time.monotonic() + total
+    state["timerEnd"] = time.monotonic() + total
+    state["timerRunning"] = True
     state["timerPausedRemaining"] = 0
     async for _ in w.alive():
         if state["timerPaused"]:
-            state["timerPausedRemaining"] = max(0, int(end - time.monotonic()))
+            state["timerPausedRemaining"] = max(0, int(state["timerEnd"] - time.monotonic()))
+            state["timerRunning"] = False
             top, bot, meta = fmt_timer(state["timerPausedRemaining"])
             frac = bot / 60.0
             w.sync({"favSvg": make_svg(top, bot, bot, mode="countdown", frac_override=frac), "favMeta": f"paused · {meta.split(' ')[0]}"})
             return
-        remaining = max(0, int(end - time.monotonic()))
+        remaining = max(0, int(state["timerEnd"] - time.monotonic()))
         top, bot, meta = fmt_timer(remaining)
         frac = bot / 60.0
         w.sync({"favSvg": make_svg(top, bot, bot, mode="countdown", frac_override=frac), "favMeta": meta})
         if remaining <= 0:
+            state["timerRunning"] = False
             w.sync({"favMeta": "done"})
             break
         await asyncio.sleep(1)
+
 
 async def timer_reset(c: Context, w: Writer):
     state["timerPaused"] = False
@@ -227,19 +263,22 @@ async def timer_reset(c: Context, w: Writer):
 async def stopwatch_start(c: Context, w: Writer):
     state["swPaused"] = False
     offset = state.get("swPausedElapsed", 0)
-    start = time.monotonic() - offset
+    state["swStart"] = time.monotonic() - offset
+    state["swRunning"] = True
     state["swPausedElapsed"] = 0
     async for _ in w.alive():
         if state.get("swPaused"):
-            state["swPausedElapsed"] = time.monotonic() - start
+            state["swPausedElapsed"] = time.monotonic() - state["swStart"]
+            state["swRunning"] = False
             elapsed = int(state["swPausedElapsed"])
             mm, ss = divmod(elapsed, 60)
-            w.sync({"favSvg": make_svg(mm, ss, ss, mode="stopwatch"), "favMeta": f"paused \u00b7 {mm:02d}:{ss:02d}"})
+            w.sync({"favSvg": make_svg(mm, ss, ss, mode="stopwatch"), "favMeta": f"paused · {mm:02d}:{ss:02d}"})
             return
-        elapsed = int(time.monotonic() - start)
+        elapsed = int(time.monotonic() - state["swStart"])
         mm, ss = divmod(elapsed, 60)
         w.sync({"favSvg": make_svg(mm, ss, ss, mode="stopwatch"), "favMeta": f"{mm:02d}:{ss:02d} elapsed"})
         await asyncio.sleep(1)
+
 
 async def stopwatch_pause(c: Context, w: Writer):
     state["swPaused"] = True
