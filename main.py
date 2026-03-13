@@ -1,9 +1,139 @@
-
 import asyncio, time, math
 from datetime import datetime
 from stario import Stario, Span, Context, Writer, data
-from stario.html import (Html, Head, Meta, Title, Script, Style, Link, Body,
-                          Div, H1, P, Button, Input, Span as HSpan, Small, A, Nav)
+from stario.html import Html, Head, Meta, Title, Script, Style, Link, Body, Div, P, Button, Input, Span as HSpan, Small, A, Nav
+from stario.relay import Relay
+
+relay = Relay()
+timer = dict(mins=5, end=0, running=False, paused=False, paused_rem=0)
+sw = dict(start=0, running=False, paused=False, paused_elapsed=0)
+
+
+def lerp(a, b, t): return a + (b - a) * t
+def to12(h): return (h % 12 or 12, "AM" if h < 12 else "PM")
+
+def time_bg(h, m):
+    t = h + m / 60.0
+    keys = [(0,8,0,0), (6,25,0.08,50), (12,30,0.08,85), (18,18,0.08,260), (24,8,0,0)]
+    for i in range(len(keys) - 1):
+        h0,l0,c0,hu0 = keys[i]; h1,l1,c1,hu1 = keys[i+1]
+        if t <= h1:
+            f = (t - h0) / (h1 - h0) if h1 != h0 else 0
+            return f"oklch({lerp(l0,l1,f):.1f}% {lerp(c0,c1,f):.3f} {lerp(hu0,hu1,f):.0f})"
+    return "oklch(8% 0 0)"
+
+def fmt_hms(secs):
+    if secs >= 3600:
+        hh, rem = divmod(secs, 3600)
+        return hh, rem // 60, f"{hh}h {rem//60:02d}m"
+    mm, ss = divmod(secs, 60)
+    return mm, ss, f"{mm:02d}:{ss:02d}"
+
+def make_svg(hour, minute, second=0, mode="time", frac=None, sz=16, font="'Courier New',monospace"):
+    h = sz / 2
+    r, circ = sz * 0.4, 2 * math.pi * sz * 0.4
+    bg = time_bg(hour, minute) if mode == "time" else "oklch(12% 0.02 260)" if mode == "countdown" else "oklch(10% 0.03 160)"
+    h12 = to12(hour)[0] if mode == "time" else hour
+    fs = sz * 0.69 if h12 < 10 else sz * 0.53
+    if frac is None: frac = minute / 60.0 if mode == "time" else second / 60.0
+    filled = circ * frac
+    accent = "#e54" if mode != "stopwatch" else "#2a2"
+    sw_w, rx = sz * 0.094, sz * 0.188
+    track = f"<circle cx='{h}' cy='{h}' r='{r:.1f}' fill='none' stroke='#fff' stroke-width='{sw_w:.1f}' stroke-opacity='0.08'/>"
+    ring = f"<circle cx='{h}' cy='{h}' r='{r:.1f}' fill='none' stroke='{accent}' stroke-width='{sw_w:.1f}' stroke-linecap='butt' stroke-dasharray='{filled:.2f} {circ:.2f}' transform='rotate(-90 {h} {h})'/>" if frac > 0 else ""
+    txt = f"<text x='{h}' y='{h+sz*0.03}' text-anchor='middle' dominant-baseline='central' font-size='{fs:.1f}' font-family=\"{font}\" font-weight='700' fill='#fff'>{h12}</text>"
+    return f"<svg viewBox='0 0 {sz} {sz}' xmlns='http://www.w3.org/2000/svg'><defs><clipPath id='c'><rect width='{sz}' height='{sz}' rx='{rx:.1f}'/></clipPath></defs><g clip-path='url(#c)'><rect width='{sz}' height='{sz}' fill='{bg}'/></g>{track}{ring}{txt}</svg>"
+
+
+def clock_sigs():
+    now = datetime.now()
+    h12, ampm = to12(now.hour)
+    return dict(favSvg=make_svg(now.hour, now.minute), favMeta=f"live · {h12}:{now.minute:02d} {ampm}")
+
+def timer_sigs():
+    if timer["running"]:
+        rem = max(0, int(timer["end"] - time.monotonic()))
+        top, bot, label = fmt_hms(rem)
+        return dict(favSvg=make_svg(top, bot, bot, mode="countdown", frac=bot / 60.0), favMeta=f"{label} remaining")
+    if timer["paused_rem"] > 0:
+        top, bot, label = fmt_hms(timer["paused_rem"])
+        return dict(favSvg=make_svg(top, bot, bot, mode="countdown", frac=bot / 60.0), favMeta=f"paused · {label}")
+    total = timer["mins"] * 60
+    top, bot, label = fmt_hms(total)
+    return dict(favSvg=make_svg(top, bot, 0, mode="countdown"), favMeta=f"{label} · ready")
+
+def sw_sigs():
+    if sw["running"]:
+        elapsed = int(time.monotonic() - sw["start"])
+        mm, ss = divmod(elapsed, 60)
+        return dict(favSvg=make_svg(mm, ss, ss, mode="stopwatch"), favMeta=f"{mm:02d}:{ss:02d} elapsed")
+    if sw["paused_elapsed"] > 0:
+        elapsed = int(sw["paused_elapsed"])
+        mm, ss = divmod(elapsed, 60)
+        return dict(favSvg=make_svg(mm, ss, ss, mode="stopwatch"), favMeta=f"paused · {mm:02d}:{ss:02d}")
+    return dict(favSvg=make_svg(0, 0, 0, mode="stopwatch"), favMeta="00:00 · ready")
+
+
+def cmd_timer_start():
+    total = timer["paused_rem"] if timer["paused_rem"] > 0 else timer["mins"] * 60
+    timer.update(dict(end=time.monotonic() + total, running=True, paused=False, paused_rem=0))
+    relay.publish("timer.start", None)
+
+def cmd_timer_pause():
+    if not timer["running"]: return
+    timer.update(dict(paused_rem=max(0, int(timer["end"] - time.monotonic())), running=False, paused=True))
+    relay.publish("timer.pause", None)
+
+def cmd_timer_reset():
+    timer.update(dict(end=0, running=False, paused=False, paused_rem=0))
+    relay.publish("timer.reset", None)
+
+def cmd_timer_duration(h, m):
+    timer.update(dict(mins=h * 60 + m, paused_rem=0, running=False, paused=False, end=0))
+    relay.publish("timer.duration", None)
+
+def cmd_sw_start():
+    sw.update(dict(start=time.monotonic() - sw["paused_elapsed"], running=True, paused=False, paused_elapsed=0))
+    relay.publish("sw.start", None)
+
+def cmd_sw_pause():
+    if not sw["running"]: return
+    sw.update(dict(paused_elapsed=time.monotonic() - sw["start"], running=False, paused=True))
+    relay.publish("sw.pause", None)
+
+def cmd_sw_reset():
+    sw.update(dict(start=0, running=False, paused=False, paused_elapsed=0))
+    relay.publish("sw.reset", None)
+
+
+async def _clock_loop(w):
+    last_min = -1
+    async for _ in w.alive():
+        now = datetime.now()
+        if now.minute != last_min:
+            last_min = now.minute
+            w.sync(clock_sigs())
+        await asyncio.sleep(1)
+
+async def _timer_loop(w):
+    w.sync(timer_sigs())
+    async for _ in w.alive():
+        if timer["running"] and timer["end"] - time.monotonic() <= 0:
+            timer.update(dict(running=False))
+            relay.publish("timer.expired", None)
+            w.sync(dict(favSvg=make_svg(0, 0, 0, mode="countdown"), favMeta="done!"))
+            return
+        w.sync(timer_sigs())
+        if not timer["running"]: return
+        await asyncio.sleep(1)
+
+async def _sw_loop(w):
+    w.sync(sw_sigs())
+    async for _ in w.alive():
+        w.sync(sw_sigs())
+        if not sw["running"]: return
+        await asyncio.sleep(1)
+
 
 CSS = """
 *, *::before, *::after { box-sizing: border-box; margin: 0; }
@@ -28,53 +158,10 @@ input[type=number] { padding: 0.6rem; border-radius: 0.5rem; border: 1px solid #
 input:focus { outline: 2px solid #e54; outline-offset: 2px; }
 """
 
-state = dict(
-    countdownMins=5, timerPaused=False, timerPausedRemaining=0,
-    timerEnd=0, timerRunning=False,
-    swStart=0, swRunning=False, swPaused=False, swPausedElapsed=0
-)
+FAVICON_EFFECT = "document.querySelector('#favicon').href = 'data:image/svg+xml,' + encodeURIComponent($favSvg);"
 
-R, CIRC = 206, 2 * math.pi * 206
-
-def lerp(a, b, t): return a + (b - a) * t
-
-def time_bg(hour, minute):
-    t = hour + minute / 60.0
-    keys = [(0,8,0,0), (6,25,0.08,50), (12,30,0.08,85), (18,18,0.08,260), (24,8,0,0)]
-    for i in range(len(keys) - 1):
-        h0,l0,c0,hu0 = keys[i]; h1,l1,c1,hu1 = keys[i+1]
-        if t <= h1:
-            f = (t-h0)/(h1-h0) if h1!=h0 else 0
-            return f"oklch({lerp(l0,l1,f):.1f}% {lerp(c0,c1,f):.3f} {lerp(hu0,hu1,f):.0f})"
-    return "oklch(8% 0 0)"
-
-def to12(hour):
-    ampm = "AM" if hour < 12 else "PM"
-    h = hour % 12
-    if h == 0: h = 12
-    return h, ampm
-
-def make_svg(hour, minute, second=0, mode="time", frac_override=None, size=16, font="'Courier New',monospace"):
-    s,h = size, size/2
-    r = s*0.4
-    circ = 2*math.pi*r
-    bg = time_bg(hour, minute) if mode == "time" else "oklch(12% 0.02 260)" if mode == "countdown" else "oklch(10% 0.03 160)"
-    h12, _ = to12(hour) if mode == "time" else (hour, "")
-    h_str = str(h12)
-    fs = s*0.69 if h12 < 10 else s*0.53
-    h_txt = f"<text x='{h}' y='{h+s*0.03}' text-anchor='middle' dominant-baseline='central' font-size='{fs:.1f}' font-family=\"{font}\" font-weight='700' fill='#fff'>{h_str}</text>"
-    frac = frac_override if frac_override is not None else (minute/60.0 if mode == "time" else second/60.0)
-    filled = circ * frac
-    accent = "#e54" if mode != "stopwatch" else "#2a2"
-    sw = s*0.094
-    rx = s*0.188
-    ring_track = f"<circle cx='{h}' cy='{h}' r='{r:.1f}' fill='none' stroke='#fff' stroke-width='{sw:.1f}' stroke-opacity='0.08'/>"
-    ring_fill = f"<circle cx='{h}' cy='{h}' r='{r:.1f}' fill='none' stroke='{accent}' stroke-width='{sw:.1f}' stroke-linecap='butt' stroke-dasharray='{filled:.2f} {circ:.2f}' transform='rotate(-90 {h} {h})'/>" if frac > 0 else ""
-    return f"<svg viewBox='0 0 {s} {s}' xmlns='http://www.w3.org/2000/svg'><defs><clipPath id='c'><rect width='{s}' height='{s}' rx='{rx:.1f}'/></clipPath></defs><g clip-path='url(#c)'><rect width='{s}' height='{s}' fill='{bg}'/></g>{ring_track}{ring_fill}{h_txt}</svg>"
-
-FAVICON_EFFECT = """document.querySelector('#favicon').href = 'data:image/svg+xml,' + encodeURIComponent($favSvg);"""
-
-def shell(*children, title="Favicon Clock", active="clock", init_svg="", init_meta="\u00a0"):
+def shell(*children, title="Clock", active="clock", sigs=None):
+    if sigs is None: sigs = clock_sigs()
     return Html({"lang": "en"},
         Head(
             Meta({"charset": "UTF-8"}),
@@ -83,221 +170,100 @@ def shell(*children, title="Favicon Clock", active="clock", init_svg="", init_me
             Script({"type": "module", "src": "https://cdn.jsdelivr.net/gh/starfederation/datastar@1.0.0-RC.8/bundles/datastar.js"}),
             Style(CSS),
             Link({"rel": "icon", "type": "image/svg+xml", "id": "favicon"})),
-        Body(data.signals({"favSvg": init_svg, "favMeta": init_meta}),
+        Body(data.signals(sigs),
             HSpan({"style": "display:none"}, data.effect(FAVICON_EFFECT)),
             Nav(A({"href": "/", "class": "on" if active == "clock" else ""}, "Clock"),
                 A({"href": "/timer", "class": "on" if active == "timer" else ""}, "Timer"),
                 A({"href": "/stopwatch", "class": "on" if active == "stopwatch" else ""}, "Stopwatch")),
             *children))
 
-def fmt_timer(remaining):
-    if remaining >= 3600:
-        hh, rem = divmod(remaining, 3600)
-        mm = rem // 60
-        return hh, mm, f"{hh}h {mm:02d}m remaining"
-    mm, ss = divmod(remaining, 60)
-    return mm, ss, f"{mm:02d}:{ss:02d} remaining"
-
-def clock_page():
-    now = datetime.now()
-    svg = make_svg(now.hour, now.minute)
-    h12, ampm = to12(now.hour)
+def clock_view():
     return shell(
         Div({"class": "face"}, data.effect("el.innerHTML = $favSvg")),
         P({"class": "meta"}, data.text("$favMeta")),
-        Div({"class": "controls"}, Button(data.on("click", "@get('/clock/start', {openWhenHidden: true})"), "Start")),
-        active="clock", title="Clock", init_svg=svg, init_meta=f"{h12}:{now.minute:02d} {ampm}")
+        Div({"class": "controls"}, Button(data.on("click", "@get('/clock/stream', {openWhenHidden: true})"), "Start")),
+        active="clock", title="Clock", sigs=clock_sigs())
 
-
-def timer_page():
-    if state["timerRunning"]:
-        remaining = max(0, int(state["timerEnd"] - time.monotonic()))
-        top, bot, meta = fmt_timer(remaining)
-        svg = make_svg(top, bot, bot, mode="countdown", frac_override=bot/60.0)
-        auto_start = data.init("@get('/timer/start', {openWhenHidden: true})")
-    elif state["timerPausedRemaining"] > 0:
-        top, bot, meta = fmt_timer(state["timerPausedRemaining"])
-        svg = make_svg(top, bot, bot, mode="countdown", frac_override=bot/60.0)
-        meta = f"paused · {meta.split(' ')[0]}"
-        auto_start = ""
-    else:
-        total = state["countdownMins"] * 60
-        top, bot, meta = fmt_timer(total)
-        svg = make_svg(top, bot, 0, mode="countdown")
-        meta = meta.replace("remaining", "· ready")
-        auto_start = ""
-    hrs, mins = state["countdownMins"] // 60, state["countdownMins"] % 60
+def timer_view():
+    auto = data.init("@get('/timer/stream', {openWhenHidden: true})") if timer["running"] else ""
+    hrs, mins = timer["mins"] // 60, timer["mins"] % 60
     return shell(
-        Div({"class": "face"}, data.effect("el.innerHTML = $favSvg"), auto_start),
+        Div({"class": "face"}, data.effect("el.innerHTML = $favSvg"), auto),
         P({"class": "meta"}, data.text("$favMeta")),
         Div({"class": "controls"},
-            Input({"type": "number", "min": "0", "max": "99", "value": str(hrs), "id": "timer-hrs", "style": "width:4rem", "data-on:change": "@post('/timer/duration?h=' + el.value + '&m=' + document.querySelector('#timer-mins').value)"}),
+            Input({"type": "number", "min": "0", "max": "99", "value": str(hrs), "id": "timer-hrs", "style": "width:4rem",
+                   "data-on:change": "@post('/timer/duration?h=' + el.value + '&m=' + document.querySelector('#timer-mins').value)"}),
             Small({"style": "color:#666"}, "hr"),
-            Input({"type": "number", "min": "0", "max": "59", "value": str(mins), "id": "timer-mins", "style": "width:4rem", "data-on:change": "@post('/timer/duration?h=' + document.querySelector('#timer-hrs').value + '&m=' + el.value)"}),
+            Input({"type": "number", "min": "0", "max": "59", "value": str(mins), "id": "timer-mins", "style": "width:4rem",
+                   "data-on:change": "@post('/timer/duration?h=' + document.querySelector('#timer-hrs').value + '&m=' + el.value)"}),
             Small({"style": "color:#666"}, "min"),
             Button(data.on("click", "@get('/timer/start', {openWhenHidden: true})"), "Start"),
             Button(data.on("click", "@post('/timer/pause')"), "Pause"),
             Button(data.on("click", "@post('/timer/reset')"), "Reset")),
-        active="timer", title="Timer", init_svg=svg, init_meta=meta)
+        active="timer", title="Timer", sigs=timer_sigs())
 
-def stopwatch_page():
-    if state["swRunning"]:
-        elapsed = int(time.monotonic() - state["swStart"])
-        mm, ss = divmod(elapsed, 60)
-        svg = make_svg(mm, ss, ss, mode="stopwatch")
-        meta = f"{mm:02d}:{ss:02d} elapsed"
-        auto_start = data.init("@get('/stopwatch/start', {openWhenHidden: true})")
-    elif state["swPausedElapsed"] > 0:
-        elapsed = int(state["swPausedElapsed"])
-        mm, ss = divmod(elapsed, 60)
-        svg = make_svg(mm, ss, ss, mode="stopwatch")
-        meta = f"paused · {mm:02d}:{ss:02d}"
-        auto_start = ""
-    else:
-        svg = make_svg(0, 0, 0, mode="stopwatch")
-        meta = "00:00 · ready"
-        auto_start = ""
+def sw_view():
+    auto = data.init("@get('/stopwatch/stream', {openWhenHidden: true})") if sw["running"] else ""
     return shell(
-        Div({"class": "face"}, data.effect("el.innerHTML = $favSvg"), auto_start),
+        Div({"class": "face"}, data.effect("el.innerHTML = $favSvg"), auto),
         P({"class": "meta"}, data.text("$favMeta")),
         Div({"class": "controls"},
             Button(data.on("click", "@get('/stopwatch/start', {openWhenHidden: true})"), "Start"),
             Button(data.on("click", "@post('/stopwatch/pause')"), "Pause"),
             Button(data.on("click", "@post('/stopwatch/reset')"), "Reset")),
-        active="stopwatch", title="Stopwatch", init_svg=svg, init_meta=meta)
+        active="stopwatch", title="Stopwatch", sigs=sw_sigs())
 
-async def timer_duration(c: Context, w: Writer):
+
+async def h_home(c: Context, w: Writer): w.html(clock_view())
+async def h_timer(c: Context, w: Writer): w.html(timer_view())
+async def h_sw(c: Context, w: Writer): w.html(sw_view())
+async def h_clock_stream(c: Context, w: Writer): await _clock_loop(w)
+async def h_timer_stream(c: Context, w: Writer): await _timer_loop(w)
+async def h_sw_stream(c: Context, w: Writer): await _sw_loop(w)
+
+async def h_timer_start(c: Context, w: Writer):
+    cmd_timer_start()
+    await _timer_loop(w)
+
+async def h_timer_pause(c: Context, w: Writer):
+    cmd_timer_pause()
+    w.sync(timer_sigs())
+
+async def h_timer_reset(c: Context, w: Writer):
+    cmd_timer_reset()
+    w.sync(timer_sigs())
+
+async def h_timer_duration(c: Context, w: Writer):
     h = max(0, min(99, int(c.req.query.get("h", "0"))))
     m = max(0, min(59, int(c.req.query.get("m", "0"))))
-    state["countdownMins"] = h * 60 + m
-    state["timerPausedRemaining"] = 0
-    total = state["countdownMins"] * 60
-    top, bot, meta = fmt_timer(total)
-    w.sync({"favSvg": make_svg(top, bot, 0, mode="countdown"), "favMeta": meta.replace("remaining", "· ready")})
+    cmd_timer_duration(h, m)
+    w.sync(timer_sigs())
 
-async def timer_start(c: Context, w: Writer):
-    state["timerPaused"] = False
-    if state["timerPausedRemaining"] > 0: total = state["timerPausedRemaining"]
-    else: total = state["countdownMins"] * 60
-    state["timerEnd"] = time.monotonic() + total
-    state["timerRunning"] = True
-    state["timerPausedRemaining"] = 0
-    async for _ in w.alive():
-        if state["timerPaused"]:
-            state["timerPausedRemaining"] = max(0, int(state["timerEnd"] - time.monotonic()))
-            state["timerRunning"] = False
-            top, bot, meta = fmt_timer(state["timerPausedRemaining"])
-            frac = bot / 60.0
-            w.sync({"favSvg": make_svg(top, bot, bot, mode="countdown", frac_override=frac), "favMeta": f"paused · {meta.split(' ')[0]}"})
-            return
-        remaining = max(0, int(state["timerEnd"] - time.monotonic()))
-        top, bot, meta = fmt_timer(remaining)
-        frac = bot / 60.0
-        w.sync({"favSvg": make_svg(top, bot, bot, mode="countdown", frac_override=frac), "favMeta": meta})
-        if remaining <= 0:
-            state["timerRunning"] = False
-            w.sync({"favMeta": "done"})
-            break
-        await asyncio.sleep(1)
+async def h_sw_start(c: Context, w: Writer):
+    cmd_sw_start()
+    await _sw_loop(w)
 
+async def h_sw_pause(c: Context, w: Writer):
+    cmd_sw_pause()
+    w.sync(sw_sigs())
 
-async def timer_reset(c: Context, w: Writer):
-    state["timerPaused"] = False
-    state["timerPausedRemaining"] = 0
-    total = state["countdownMins"] * 60
-    top, bot, meta = fmt_timer(total)
-    w.sync({"favSvg": make_svg(top, bot, 0, mode="countdown"), "favMeta": meta.replace("remaining", "· ready")})
+async def h_sw_reset(c: Context, w: Writer):
+    cmd_sw_reset()
+    w.sync(sw_sigs())
 
-async def home(c: Context, w: Writer): w.html(clock_page())
-async def timer_home(c: Context, w: Writer): w.html(timer_page())
-async def stopwatch_home(c: Context, w: Writer): w.html(stopwatch_page())
-
-async def clock_start(c: Context, w: Writer):
-    last_min = -1
-    now = datetime.now()
-    svg = make_svg(now.hour, now.minute)
-    h12, ampm = to12(now.hour)
-    w.sync({"favSvg": svg, "favMeta": f"live \u00b7 {h12}:{now.minute:02d} {ampm}"})
-    async for _ in w.alive():
-        now = datetime.now()
-        if now.minute != last_min:
-            last_min = now.minute
-            h12, ampm = to12(now.hour)
-            w.sync({"favSvg": make_svg(now.hour, now.minute), "favMeta": f"live \u00b7 {h12}:{now.minute:02d} {ampm}"})
-        await asyncio.sleep(1)
-
-async def timer_start(c: Context, w: Writer):
-    state["timerPaused"] = False
-    if state["timerPausedRemaining"] > 0: total = state["timerPausedRemaining"]
-    else: total = state["countdownMins"] * 60
-    end = time.monotonic() + total
-    state["timerPausedRemaining"] = 0
-    async for _ in w.alive():
-        if state["timerPaused"]:
-            state["timerPausedRemaining"] = max(0, int(end - time.monotonic()))
-            mm, ss = divmod(state["timerPausedRemaining"], 60)
-            w.sync({"favSvg": make_svg(mm, ss, ss, mode="countdown"), "favMeta": f"paused \u00b7 {mm:02d}:{ss:02d}"})
-            return
-        remaining = max(0, int(end - time.monotonic()))
-        mm, ss = divmod(remaining, 60)
-        w.sync({"favSvg": make_svg(mm, ss, ss, mode="countdown"), "favMeta": f"{mm:02d}:{ss:02d} remaining"})
-        if remaining <= 0:
-            w.sync({"favMeta": "done"})
-            break
-        await asyncio.sleep(1)
-
-async def timer_pause(c: Context, w: Writer):
-    state["timerPaused"] = True
-    w.sync({})
-
-async def timer_duration(c: Context, w: Writer):
-    state["countdownMins"] = max(1, min(99, int(c.req.query.get("m", "5"))))
-    state["timerPausedRemaining"] = 0
-    w.sync({"favSvg": make_svg(state["countdownMins"], 0, 0, mode="countdown"), "favMeta": f"{state['countdownMins']}:00 \u00b7 ready"})
-
-async def timer_reset(c: Context, w: Writer):
-    state["timerPaused"] = False
-    state["timerPausedRemaining"] = 0
-    w.sync({"favSvg": make_svg(state["countdownMins"], 0, 0, mode="countdown"), "favMeta": f"{state['countdownMins']}:00 \u00b7 ready"})
-
-async def stopwatch_start(c: Context, w: Writer):
-    state["swPaused"] = False
-    offset = state.get("swPausedElapsed", 0)
-    state["swStart"] = time.monotonic() - offset
-    state["swRunning"] = True
-    state["swPausedElapsed"] = 0
-    async for _ in w.alive():
-        if state.get("swPaused"):
-            state["swPausedElapsed"] = time.monotonic() - state["swStart"]
-            state["swRunning"] = False
-            elapsed = int(state["swPausedElapsed"])
-            mm, ss = divmod(elapsed, 60)
-            w.sync({"favSvg": make_svg(mm, ss, ss, mode="stopwatch"), "favMeta": f"paused · {mm:02d}:{ss:02d}"})
-            return
-        elapsed = int(time.monotonic() - state["swStart"])
-        mm, ss = divmod(elapsed, 60)
-        w.sync({"favSvg": make_svg(mm, ss, ss, mode="stopwatch"), "favMeta": f"{mm:02d}:{ss:02d} elapsed"})
-        await asyncio.sleep(1)
-
-
-async def stopwatch_pause(c: Context, w: Writer):
-    state["swPaused"] = True
-    w.sync({})
-
-async def stopwatch_reset(c: Context, w: Writer):
-    state["swPaused"] = False
-    state["swPausedElapsed"] = 0
-    w.sync({"favSvg": make_svg(0, 0, 0, mode="stopwatch"), "favMeta": "00:00 \u00b7 ready"})
 
 async def bootstrap(app: Stario, span: Span):
-    app.get("/", home)
-    app.get("/timer", timer_home)
-    app.get("/stopwatch", stopwatch_home)
-    app.get("/clock/start", clock_start)
-    app.get("/timer/start", timer_start)
-    app.post("/timer/pause", timer_pause)
-    app.post("/timer/duration", timer_duration)
-    app.post("/timer/reset", timer_reset)
-    app.get("/stopwatch/start", stopwatch_start)
-    app.post("/stopwatch/pause", stopwatch_pause)
-    app.post("/stopwatch/reset", stopwatch_reset)
+    "Register all routes"
+    app.get("/", h_home)
+    app.get("/timer", h_timer)
+    app.get("/stopwatch", h_sw)
+    app.get("/clock/stream", h_clock_stream)
+    app.get("/timer/start", h_timer_start)
+    app.get("/timer/stream", h_timer_stream)
+    app.post("/timer/pause", h_timer_pause)
+    app.post("/timer/reset", h_timer_reset)
+    app.post("/timer/duration", h_timer_duration)
+    app.get("/stopwatch/start", h_sw_start)
+    app.get("/stopwatch/stream", h_sw_stream)
+    app.post("/stopwatch/pause", h_sw_pause)
+    app.post("/stopwatch/reset", h_sw_reset)
