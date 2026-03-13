@@ -246,6 +246,7 @@ async def h_sw_reset(c: Context, w: Writer):
     cmd_sw_reset()
     w.sync(sw_sigs())
 
+async def h_health(c: Context, w: Writer): w.text("ok")
 
 async def bootstrap(app: Stario, span: Span):
     app.get("/", h_home)
@@ -261,3 +262,4 @@ async def bootstrap(app: Stario, span: Span):
     app.post("/stopwatch/start", h_sw_start)
     app.post("/stopwatch/pause", h_sw_pause)
     app.post("/stopwatch/reset", h_sw_reset)
+    app.get("/health", h_health)
