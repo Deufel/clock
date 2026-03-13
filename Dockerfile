@@ -15,4 +15,4 @@ RUN uv sync --no-dev --frozen
 COPY . .
 
 # Run the app
-CMD ["uv", "run", "stario", "serve", "main:bootstrap"]
+CMD ["uv", "run", "stario", "serve", "main:bootstrap", "--host", "0.0.0.0"]
