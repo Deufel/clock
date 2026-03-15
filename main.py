@@ -2,9 +2,12 @@ import asyncio, time, math
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from stario import Stario, Span, Context, Writer, data
-from stario.html import Html, Head, Meta, Title, Script, Style, Link, Body, Div, P, Button, Input, Span as HSpan, Small, A, Nav
+from stario.html import (Html, Head, Meta, Title, Script, Style, Link, Body,
+                          Div, H1, H3, P, Button, Input, Span as HSpan, Small, A, Nav, Ul, Li, Form)
 from stario.relay import Relay
-from db import new_session, valid_session, get_json, set_json
+from db import (new_session, valid_session, get_json, set_json,
+                add_task, get_tasks, get_task, task_start_tracking,
+                task_stop_tracking, task_complete, task_elapsed, stop_all_tracking)
 
 TZ = ZoneInfo("America/Chicago")
 relay = Relay()
@@ -42,6 +45,13 @@ def fmt_hms(secs):
         return hh, rem // 60, f"{hh}h {rem//60:02d}m"
     mm, ss = divmod(secs, 60)
     return mm, ss, f"{mm:02d}:{ss:02d}"
+
+def fmt_elapsed(secs):
+    if secs >= 3600:
+        hh, rem = divmod(secs, 3600)
+        return f"{hh}h {rem//60:02d}m {rem%60:02d}s"
+    mm, ss = divmod(secs, 60)
+    return f"{mm:02d}:{ss:02d}"
 
 def make_svg(hour, minute, second=0, mode="time", frac=None, sz=16, font="'Courier New',monospace"):
     h = sz / 2
@@ -87,6 +97,34 @@ def sw_sigs(sid):
         mm, ss = divmod(int(s["paused_elapsed"]), 60)
         return dict(favSvg=make_svg(mm, ss, ss, mode="stopwatch"), favMeta=f"paused · {mm:02d}:{ss:02d}")
     return dict(favSvg=make_svg(0, 0, 0, mode="stopwatch"), favMeta="00:00 · ready")
+
+def tasks_sigs(sid):
+    tasks = get_tasks(sid)
+    active = [t for t in tasks if t["track_start"] is not None]
+    if active:
+        t = active[0]
+        e = fmt_elapsed(task_elapsed(t))
+        return dict(favMeta=f"tracking · {t['name']} · {e}", taskHtml=tasks_html(tasks))
+    return dict(favMeta=f"{len(tasks)} task{'s' if len(tasks) != 1 else ''} · idle", taskHtml=tasks_html(tasks))
+
+def tasks_html(tasks):
+    if not tasks: return "<p style='color:#555; text-align:center'>no tasks yet</p>"
+    rows = []
+    for t in tasks:
+        e = fmt_elapsed(task_elapsed(t))
+        tracking = t["track_start"] is not None
+        tid = t["id"]
+        toggle = f"@post('/tasks/stop?id={tid}')" if tracking else f"@post('/tasks/track?id={tid}')"
+        btn_label = "Stop" if tracking else "Track"
+        btn_cls = " on" if tracking else ""
+        rows.append(
+            f"<li style='display:flex; align-items:center; gap:0.75rem; padding:0.5rem 0; border-bottom:1px solid #222'>"
+            f"<span style='flex:1; font-size:1rem'>{t['name']}</span>"
+            f"<span style='color:#888; font-size:0.85rem; font-family:monospace; min-width:6rem; text-align:right'>{e}</span>"
+            f"<button class='task-btn{btn_cls}' data-on:click=\"{toggle}\">{btn_label}</button>"
+            f"<button class='task-btn' data-on:click=\"@post('/tasks/done?id={tid}')\">✓</button>"
+            f"</li>")
+    return f"<ul style='list-style:none; padding:0; width:100%'>{''.join(rows)}</ul>"
 
 
 def cmd_timer_start(sid):
@@ -134,6 +172,23 @@ def cmd_sw_reset(sid):
     set_json(sid, "sw", s)
     relay.publish(f"sw.{sid}", None)
 
+def cmd_task_add(sid, name):
+    add_task(sid, name.strip())
+    relay.publish(f"tasks.{sid}", None)
+
+def cmd_task_track(sid, tid):
+    stop_all_tracking(sid)
+    task_start_tracking(tid)
+    relay.publish(f"tasks.{sid}", None)
+
+def cmd_task_stop(sid, tid):
+    task_stop_tracking(tid)
+    relay.publish(f"tasks.{sid}", None)
+
+def cmd_task_done(sid, tid):
+    task_complete(tid)
+    relay.publish(f"tasks.{sid}", None)
+
 
 async def _clock_loop(w):
     last_min = -1
@@ -159,6 +214,19 @@ async def _sw_loop(w, sid):
         w.sync(sw_sigs(sid))
         await asyncio.sleep(1)
 
+async def _tasks_loop(w, sid):
+    async for _ in w.alive():
+        w.sync(tasks_sigs(sid))
+        await asyncio.sleep(1)
+
+
+TASK_CSS = """
+.task-btn { padding: 0.4rem 0.8rem; font-size: 0.8rem; min-width: 3.5rem; }
+.task-btn.on { background: #e54; border-color: #e54; color: #fff; }
+.task-input { padding: 0.6rem; border-radius: 0.5rem; border: 1px solid #333; background: #151515; color: #fff; font: inherit; flex: 1; font-size: 0.95rem; }
+@media (prefers-color-scheme: light) { .task-input { background: #fff; color: #222; border-color: #ddd; } }
+.task-input:focus { outline: 2px solid #e54; outline-offset: 2px; }
+"""
 
 CSS = """
 *, *::before, *::after { box-sizing: border-box; margin: 0; }
@@ -181,7 +249,7 @@ button.on { background: #e54; border-color: #e54; color: #fff; }
 input[type=number] { padding: 0.6rem; border-radius: 0.5rem; border: 1px solid #333; background: #151515; color: #fff; font: inherit; width: 5rem; text-align: center; font-size: 1.1rem; }
 @media (prefers-color-scheme: light) { input[type=number] { background: #fff; color: #222; border-color: #ddd; } }
 input:focus { outline: 2px solid #e54; outline-offset: 2px; }
-"""
+""" + TASK_CSS
 
 FAVICON_EFFECT = "document.querySelector('#favicon').href = 'data:image/svg+xml,' + encodeURIComponent($favSvg);"
 
@@ -199,7 +267,8 @@ def shell(*children, title="Clock", active="clock", sigs=None):
             HSpan({"style": "display:none"}, data.effect(FAVICON_EFFECT)),
             Nav(A({"href": "/", "class": "on" if active == "clock" else ""}, "Clock"),
                 A({"href": "/timer", "class": "on" if active == "timer" else ""}, "Timer"),
-                A({"href": "/stopwatch", "class": "on" if active == "stopwatch" else ""}, "Stopwatch")),
+                A({"href": "/stopwatch", "class": "on" if active == "stopwatch" else ""}, "Stopwatch"),
+                A({"href": "/tasks", "class": "on" if active == "tasks" else ""}, "Tasks")),
             *children))
 
 def clock_view():
@@ -239,6 +308,22 @@ def sw_view(sid):
             Button(data.on("click", "@post('/stopwatch/reset')"), "Reset")),
         active="stopwatch", title="Stopwatch", sigs=sw_sigs(sid))
 
+def tasks_view(sid):
+    sigs = tasks_sigs(sid)
+    sigs["favSvg"] = clock_sigs()["favSvg"]
+    sigs["_taskName"] = ""
+    return shell(
+        Div({"class": "controls", "style": "width: min(80vw, 500px)"},
+            Input({"class": "task-input", "type": "text", "placeholder": "new task...",
+                   "data-bind": "_taskName",
+                   "data-on:keydown__key.enter": "@post('/tasks/add')"}),
+            Button(data.on("click", "@post('/tasks/add')"), "Add")),
+        P({"class": "meta"}, data.text("$favMeta")),
+        Div({"id": "task-list", "style": "width: min(80vw, 500px)"},
+            data.effect("el.innerHTML = $taskHtml"),
+            data.init("@get('/tasks/stream', {openWhenHidden: true})")),
+        active="tasks", title="Tasks", sigs=sigs)
+
 
 async def h_home(c: Context, w: Writer):
     get_sid(c, w)
@@ -252,6 +337,10 @@ async def h_sw(c: Context, w: Writer):
     sid = get_sid(c, w)
     w.html(sw_view(sid))
 
+async def h_tasks(c: Context, w: Writer):
+    sid = get_sid(c, w)
+    w.html(tasks_view(sid))
+
 async def h_clock_stream(c: Context, w: Writer): await _clock_loop(w)
 
 async def h_timer_stream(c: Context, w: Writer):
@@ -261,6 +350,10 @@ async def h_timer_stream(c: Context, w: Writer):
 async def h_sw_stream(c: Context, w: Writer):
     sid = get_sid(c, w)
     await _sw_loop(w, sid)
+
+async def h_tasks_stream(c: Context, w: Writer):
+    sid = get_sid(c, w)
+    await _tasks_loop(w, sid)
 
 async def h_timer_start(c: Context, w: Writer):
     sid = get_sid(c, w)
@@ -299,15 +392,43 @@ async def h_sw_reset(c: Context, w: Writer):
     cmd_sw_reset(sid)
     w.sync(sw_sigs(sid))
 
+async def h_task_add(c: Context, w: Writer):
+    sid = get_sid(c, w)
+    s = await c.signals()
+    name = s.get("_taskName", "").strip()
+    if name:
+        cmd_task_add(sid, name)
+        w.sync(dict(_taskName=""))
+
+async def h_task_track(c: Context, w: Writer):
+    sid = get_sid(c, w)
+    tid = int(c.req.query.get("id", "0"))
+    cmd_task_track(sid, tid)
+    w.sync(tasks_sigs(sid))
+
+async def h_task_stop(c: Context, w: Writer):
+    sid = get_sid(c, w)
+    tid = int(c.req.query.get("id", "0"))
+    cmd_task_stop(sid, tid)
+    w.sync(tasks_sigs(sid))
+
+async def h_task_done(c: Context, w: Writer):
+    sid = get_sid(c, w)
+    tid = int(c.req.query.get("id", "0"))
+    cmd_task_done(sid, tid)
+    w.sync(tasks_sigs(sid))
+
 async def h_health(c: Context, w: Writer): w.text("ok")
 
 async def bootstrap(app: Stario, span: Span):
     app.get("/", h_home)
     app.get("/timer", h_timer)
     app.get("/stopwatch", h_sw)
+    app.get("/tasks", h_tasks)
     app.get("/clock/stream", h_clock_stream)
     app.get("/timer/stream", h_timer_stream)
     app.get("/stopwatch/stream", h_sw_stream)
+    app.get("/tasks/stream", h_tasks_stream)
     app.post("/timer/start", h_timer_start)
     app.post("/timer/pause", h_timer_pause)
     app.post("/timer/reset", h_timer_reset)
@@ -315,4 +436,8 @@ async def bootstrap(app: Stario, span: Span):
     app.post("/stopwatch/start", h_sw_start)
     app.post("/stopwatch/pause", h_sw_pause)
     app.post("/stopwatch/reset", h_sw_reset)
+    app.post("/tasks/add", h_task_add)
+    app.post("/tasks/track", h_task_track)
+    app.post("/tasks/stop", h_task_stop)
+    app.post("/tasks/done", h_task_done)
     app.get("/health", h_health)
