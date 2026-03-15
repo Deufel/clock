@@ -311,11 +311,11 @@ def sw_view(sid):
 def tasks_view(sid):
     sigs = tasks_sigs(sid)
     sigs["favSvg"] = clock_sigs()["favSvg"]
-    sigs["_taskName"] = ""
+    sigs["taskName"] = ""
     return shell(
         Div({"class": "controls", "style": "width: min(80vw, 500px)"},
             Input({"class": "task-input", "type": "text", "placeholder": "new task...",
-                   "data-bind": "_taskName",
+                   "data-bind": "taskName",
                    "data-on:keydown__key.enter": "@post('/tasks/add')"}),
             Button(data.on("click", "@post('/tasks/add')"), "Add")),
         P({"class": "meta"}, data.text("$favMeta")),
@@ -395,10 +395,10 @@ async def h_sw_reset(c: Context, w: Writer):
 async def h_task_add(c: Context, w: Writer):
     sid = get_sid(c, w)
     s = await c.signals()
-    name = s.get("_taskName", "").strip()
+    name = s.get("taskName", "").strip()
     if name:
         cmd_task_add(sid, name)
-        w.sync(dict(_taskName=""))
+        w.sync({"taskName": "", **tasks_sigs(sid)})
 
 async def h_task_track(c: Context, w: Writer):
     sid = get_sid(c, w)
