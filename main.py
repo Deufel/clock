@@ -11,9 +11,10 @@ from db import (new_session, valid_session, get_json, set_json,
 
 TZ = ZoneInfo("America/Chicago")
 relay = Relay()
-
 TIMER_DEFAULT = dict(mins=5, end=0, running=False, paused=False, paused_rem=0)
 SW_DEFAULT = dict(start=0, running=False, paused=False, paused_elapsed=0)
+FONT = "Inter, system-ui, sans-serif"
+MONO = "'JetBrains Mono', 'SF Mono', monospace"
 
 def get_sid(c, w):
     sid = c.req.cookies.get("sid", "")
@@ -24,7 +25,6 @@ def get_sid(c, w):
 
 def get_timer(sid): return get_json(sid, "timer", lambda: dict(TIMER_DEFAULT))
 def get_sw(sid): return get_json(sid, "sw", lambda: dict(SW_DEFAULT))
-
 
 def lerp(a, b, t): return a + (b - a) * t
 def to12(h): return (h % 12 or 12, "AM" if h < 12 else "PM")
@@ -53,7 +53,7 @@ def fmt_elapsed(secs):
     mm, ss = divmod(secs, 60)
     return f"{mm:02d}:{ss:02d}"
 
-def make_svg(hour, minute, second=0, mode="time", frac=None, sz=16, font="'Courier New',monospace"):
+def make_svg(hour, minute, second=0, mode="time", frac=None, sz=16):
     h = sz / 2
     r, circ = sz * 0.4, 2 * math.pi * sz * 0.4
     bg = time_bg(hour, minute) if mode == "time" else "oklch(12% 0.02 260)" if mode == "countdown" else "oklch(10% 0.03 160)"
@@ -65,14 +65,23 @@ def make_svg(hour, minute, second=0, mode="time", frac=None, sz=16, font="'Couri
     sw_w, rx = sz * 0.094, sz * 0.188
     track = f"<circle cx='{h}' cy='{h}' r='{r:.1f}' fill='none' stroke='#fff' stroke-width='{sw_w:.1f}' stroke-opacity='0.08'/>"
     ring = f"<circle cx='{h}' cy='{h}' r='{r:.1f}' fill='none' stroke='{accent}' stroke-width='{sw_w:.1f}' stroke-linecap='butt' stroke-dasharray='{filled:.2f} {circ:.2f}' transform='rotate(-90 {h} {h})'/>" if frac > 0 else ""
-    txt = f"<text x='{h}' y='{h+sz*0.03}' text-anchor='middle' dominant-baseline='central' font-size='{fs:.1f}' font-family=\"{font}\" font-weight='700' fill='#fff'>{h12}</text>"
-    return f"<svg viewBox='0 0 {sz} {sz}' xmlns='http://www.w3.org/2000/svg'><defs><clipPath id='c'><rect width='{sz}' height='{sz}' rx='{rx:.1f}'/></clipPath></defs><g clip-path='url(#c)'><rect width='{sz}' height='{sz}' fill='{bg}'/></g>{track}{ring}{txt}</svg>"
+    txt = f"<text x='{h}' y='{h+sz*0.03}' text-anchor='middle' dominant-baseline='central' font-size='{fs:.1f}' font-family=\"{FONT}\" font-weight='700' fill='#fff'>{h12}</text>"
+    sec_hand = ""
+    if mode == "time":
+        sec_deg = (second / 60.0) * 360
+        sec_r = r * 0.85
+        sec_hand = (f"<g transform='rotate({sec_deg:.1f} {h} {h})' style='animation: spin 60s linear infinite; transform-origin: {h}px {h}px'>"
+                    f"<line x1='{h}' y1='{h}' x2='{h}' y2='{h - sec_r:.2f}' stroke='{accent}' stroke-width='0.15' opacity='0.6'/>"
+                    f"<circle cx='{h}' cy='{h - sec_r:.2f}' r='0.25' fill='{accent}' opacity='0.8'/></g>")
+    style = "<style>@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }</style>" if mode == "time" else ""
+    return f"<svg viewBox='0 0 {sz} {sz}' xmlns='http://www.w3.org/2000/svg'>{style}<defs><clipPath id='c'><rect width='{sz}' height='{sz}' rx='{rx:.1f}'/></clipPath></defs><g clip-path='url(#c)'><rect width='{sz}' height='{sz}' fill='{bg}'/></g>{track}{ring}{sec_hand}{txt}</svg>"
 
 
 def clock_sigs():
     now = datetime.now(TZ)
     h12, ampm = to12(now.hour)
-    return dict(favSvg=make_svg(now.hour, now.minute), favMeta=f"{h12}:{now.minute:02d} {ampm}")
+    svg = make_svg(now.hour, now.minute, now.second + now.microsecond / 1e6)
+    return dict(favSvg=svg, favMeta=f"{h12}:{now.minute:02d}:{now.second:02d} {ampm}")
 
 def timer_sigs(sid):
     t = get_timer(sid)
@@ -141,12 +150,11 @@ def tasks_html(tasks):
         tracking = t["track_start"] is not None
         tid = t["id"]
         toggle = f"@post('/tasks/stop?id={tid}')" if tracking else f"@post('/tasks/track?id={tid}')"
-        btn_label = "Stop" if tracking else "Track"
-        btn_cls = " on" if tracking else ""
+        btn_label, btn_cls = ("Stop", " on") if tracking else ("Track", "")
         rows.append(
             f"<li style='display:flex; align-items:center; gap:0.75rem; padding:0.5rem 0; border-bottom:1px solid #222'>"
             f"<span style='flex:1; font-size:1rem'>{t['name']}</span>"
-            f"<span style='color:#888; font-size:0.85rem; font-family:monospace; min-width:6rem; text-align:right'>{e}</span>"
+            f"<span style='color:#888; font-size:0.85rem; font-family:{MONO}; min-width:6rem; text-align:right'>{e}</span>"
             f"<button class='task-btn{btn_cls}' data-on:click=\"{toggle}\">{btn_label}</button>"
             f"<button class='task-btn' data-on:click=\"@post('/tasks/done?id={tid}')\">✓</button>"
             f"</li>")
@@ -217,12 +225,8 @@ def cmd_task_done(sid, tid):
 
 
 async def _clock_loop(w):
-    last_min = -1
     async for _ in w.alive():
-        now = datetime.now(TZ)
-        if now.minute != last_min:
-            last_min = now.minute
-            w.sync(clock_sigs())
+        w.sync(clock_sigs())
         await asyncio.sleep(1)
 
 async def _timer_loop(w, sid):
@@ -255,31 +259,35 @@ TASK_CSS = """
 """
 
 CSS = """
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap');
 *, *::before, *::after { box-sizing: border-box; margin: 0; }
-body { font-family: system-ui, sans-serif; min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; background: #0a0a0a; color: #eee; padding: 2rem; gap: 2rem; }
+body { font-family: Inter, system-ui, sans-serif; min-height: 100vh; background: #0a0a0a; color: #eee; margin: 0; }
 @media (prefers-color-scheme: light) { body { background: #f8f8f8; color: #222; } }
+.page { display: grid; grid-template-rows: auto auto 1fr; align-items: start; justify-items: center; min-height: 100vh; padding: 2rem 1rem; gap: 1.5rem; }
 nav { display: flex; gap: 2rem; }
-nav a { color: #666; text-decoration: none; font-size: 0.9rem; font-weight: 500; letter-spacing: 0.05em; text-transform: uppercase; padding: 0.4rem 0; border-bottom: 2px solid transparent; transition: all 0.2s; }
+nav a { color: #666; text-decoration: none; font-size: 0.8rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; padding: 0.4rem 0; border-bottom: 2px solid transparent; transition: all 0.2s; }
 nav a:hover { color: #eee; }
 @media (prefers-color-scheme: light) { nav a:hover { color: #222; } }
 nav a.on { color: #e54; border-bottom-color: #e54; }
-.face { width: min(80vw, 420px); aspect-ratio: 1; }
+.clock-row { display: flex; flex-direction: column; align-items: center; gap: 0.75rem; }
+.face { width: 240px; height: 240px; }
 .face svg { width: 100%; height: 100%; }
-.meta { text-align: center; color: #555; font-size: 0.85rem; letter-spacing: 0.1em; text-transform: uppercase; min-height: 1.4em; }
-.controls { display: flex; gap: 0.75rem; align-items: center; justify-content: center; min-height: 3rem; }
-button { padding: 0.6rem 1.4rem; border-radius: 0.5rem; border: 1px solid #333; background: #151515; color: #eee; font: inherit; cursor: pointer; font-size: 0.9rem; transition: all 0.15s; }
+.meta { text-align: center; color: #555; font-size: 0.8rem; font-family: 'JetBrains Mono', monospace; letter-spacing: 0.1em; text-transform: uppercase; min-height: 1.4em; }
+.content { width: min(90vw, 500px); display: flex; flex-direction: column; align-items: center; gap: 1rem; }
+.controls { display: flex; gap: 0.75rem; align-items: center; justify-content: center; flex-wrap: wrap; }
+button { padding: 0.5rem 1.2rem; border-radius: 0.5rem; border: 1px solid #333; background: #151515; color: #eee; font: inherit; cursor: pointer; font-size: 0.85rem; transition: all 0.15s; }
 @media (prefers-color-scheme: light) { button { background: #fff; color: #222; border-color: #ddd; } }
 button:hover { background: #222; border-color: #555; }
 @media (prefers-color-scheme: light) { button:hover { background: #eee; } }
 button.on { background: #e54; border-color: #e54; color: #fff; }
-input[type=number] { padding: 0.6rem; border-radius: 0.5rem; border: 1px solid #333; background: #151515; color: #fff; font: inherit; width: 5rem; text-align: center; font-size: 1.1rem; }
+input[type=number] { padding: 0.5rem; border-radius: 0.5rem; border: 1px solid #333; background: #151515; color: #fff; font: inherit; width: 4.5rem; text-align: center; font-size: 1rem; }
 @media (prefers-color-scheme: light) { input[type=number] { background: #fff; color: #222; border-color: #ddd; } }
 input:focus { outline: 2px solid #e54; outline-offset: 2px; }
 """ + TASK_CSS
 
 FAVICON_EFFECT = "document.querySelector('#favicon').href = 'data:image/svg+xml,' + encodeURIComponent($favSvg);"
 
-def shell(*children, title="Clock", active="clock", sigs=None):
+def shell(*content_children, title="Clock", active="clock", sigs=None, stream_url="/clock/stream"):
     if sigs is None: sigs = clock_sigs()
     return Html({"lang": "en"},
         Head(
@@ -290,27 +298,24 @@ def shell(*children, title="Clock", active="clock", sigs=None):
             Style(CSS),
             Link({"rel": "icon", "type": "image/svg+xml", "id": "favicon"})),
         Body(data.signals(sigs),
-            HSpan({"style": "display:none"}, data.effect(FAVICON_EFFECT)),
-            Nav(A({"href": "/", "class": "on" if active == "clock" else ""}, "Clock"),
-                A({"href": "/timer", "class": "on" if active == "timer" else ""}, "Timer"),
-                A({"href": "/stopwatch", "class": "on" if active == "stopwatch" else ""}, "Stopwatch"),
-                A({"href": "/tasks", "class": "on" if active == "tasks" else ""}, "Tasks")),
-            *children))
+            Div({"class": "page"},
+                Nav(A({"href": "/", "class": "on" if active == "clock" else ""}, "Clock"),
+                    A({"href": "/timer", "class": "on" if active == "timer" else ""}, "Timer"),
+                    A({"href": "/stopwatch", "class": "on" if active == "stopwatch" else ""}, "Stopwatch"),
+                    A({"href": "/tasks", "class": "on" if active == "tasks" else ""}, "Tasks")),
+                Div({"class": "clock-row"},
+                    HSpan({"style": "display:none"}, data.effect(FAVICON_EFFECT)),
+                    Div({"class": "face"}, data.effect("el.innerHTML = $favSvg"),
+                        data.init(f"@get('{stream_url}', {{openWhenHidden: true}})")),
+                    P({"class": "meta"}, data.text("$favMeta"))),
+                Div({"class": "content"}, *content_children))))
 
-def clock_view():
-    return shell(
-        Div({"class": "face"}, data.effect("el.innerHTML = $favSvg"),
-            data.init("@get('/clock/stream', {openWhenHidden: true})")),
-        P({"class": "meta"}, data.text("$favMeta")),
-        active="clock", title="Clock", sigs=clock_sigs())
+def clock_view(): return shell(active="clock", title="Clock", sigs=clock_sigs(), stream_url="/clock/stream")
 
 def timer_view(sid):
     t = get_timer(sid)
     hrs, mins = t["mins"] // 60, t["mins"] % 60
     return shell(
-        Div({"class": "face"}, data.effect("el.innerHTML = $favSvg"),
-            data.init("@get('/timer/stream', {openWhenHidden: true})")),
-        P({"class": "meta"}, data.text("$favMeta")),
         Div({"class": "controls"},
             Input({"type": "number", "min": "0", "max": "99", "value": str(hrs), "id": "timer-hrs", "style": "width:4rem",
                    "data-on:change": "@post('/timer/duration?h=' + el.value + '&m=' + document.querySelector('#timer-mins').value)"}),
@@ -321,34 +326,27 @@ def timer_view(sid):
             Button(data.on("click", "@post('/timer/start')"), "Start"),
             Button(data.on("click", "@post('/timer/pause')"), "Pause"),
             Button(data.on("click", "@post('/timer/reset')"), "Reset")),
-        active="timer", title="Timer", sigs=timer_sigs(sid))
+        active="timer", title="Timer", sigs=timer_sigs(sid), stream_url="/timer/stream")
 
 def sw_view(sid):
     return shell(
-        Div({"class": "face"}, data.effect("el.innerHTML = $favSvg"),
-            data.init("@get('/stopwatch/stream', {openWhenHidden: true})")),
-        P({"class": "meta"}, data.text("$favMeta")),
         Div({"class": "controls"},
             Button(data.on("click", "@post('/stopwatch/start')"), "Start"),
             Button(data.on("click", "@post('/stopwatch/pause')"), "Pause"),
             Button(data.on("click", "@post('/stopwatch/reset')"), "Reset")),
-        active="stopwatch", title="Stopwatch", sigs=sw_sigs(sid))
+        active="stopwatch", title="Stopwatch", sigs=sw_sigs(sid), stream_url="/stopwatch/stream")
 
 def tasks_view(sid):
     sigs = tasks_sigs(sid)
     sigs["taskName"] = ""
     return shell(
-        Div({"class": "face"}, data.effect("el.innerHTML = $favSvg"),
-            data.init("@get('/tasks/stream', {openWhenHidden: true})")),
-        P({"class": "meta"}, data.text("$favMeta")),
-        Div({"class": "controls", "style": "width: min(80vw, 500px)"},
+        Div({"class": "controls", "style": "width:100%"},
             Input({"class": "task-input", "type": "text", "placeholder": "new task...",
                    "data-bind": "taskName",
                    "data-on:keydown": "if (event.key === 'Enter') @post('/tasks/add')"}),
             Button(data.on("click", "@post('/tasks/add')"), "Add")),
-        Div({"id": "task-list", "style": "width: min(80vw, 500px)"},
-            data.effect("el.innerHTML = $taskHtml")),
-        active="tasks", title="Tasks", sigs=sigs)
+        Div({"id": "task-list", "style": "width:100%"}, data.effect("el.innerHTML = $taskHtml")),
+        active="tasks", title="Tasks", sigs=sigs, stream_url="/tasks/stream")
 
 
 async def h_home(c: Context, w: Writer):
