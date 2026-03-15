@@ -4,11 +4,23 @@ from zoneinfo import ZoneInfo
 from stario import Stario, Span, Context, Writer, data
 from stario.html import Html, Head, Meta, Title, Script, Style, Link, Body, Div, P, Button, Input, Span as HSpan, Small, A, Nav
 from stario.relay import Relay
+from db import new_session, valid_session, get_json, set_json
 
 TZ = ZoneInfo("America/Chicago")
 relay = Relay()
-timer = dict(mins=5, end=0, running=False, paused=False, paused_rem=0)
-sw = dict(start=0, running=False, paused=False, paused_elapsed=0)
+
+TIMER_DEFAULT = dict(mins=5, end=0, running=False, paused=False, paused_rem=0)
+SW_DEFAULT = dict(start=0, running=False, paused=False, paused_elapsed=0)
+
+def get_sid(c, w):
+    sid = c.req.cookies.get("sid", "")
+    if valid_session(sid): return sid
+    sid = new_session()
+    w.cookie("sid", sid, httponly=True, samesite="Lax", path="/")
+    return sid
+
+def get_timer(sid): return get_json(sid, "timer", lambda: dict(TIMER_DEFAULT))
+def get_sw(sid): return get_json(sid, "sw", lambda: dict(SW_DEFAULT))
 
 
 def lerp(a, b, t): return a + (b - a) * t
@@ -52,59 +64,75 @@ def clock_sigs():
     h12, ampm = to12(now.hour)
     return dict(favSvg=make_svg(now.hour, now.minute), favMeta=f"{h12}:{now.minute:02d} {ampm}")
 
-def timer_sigs():
-    if timer["running"]:
-        rem = max(0, int(timer["end"] - time.monotonic()))
+def timer_sigs(sid):
+    t = get_timer(sid)
+    if t["running"]:
+        rem = max(0, int(t["end"] - time.monotonic()))
         top, bot, label = fmt_hms(rem)
         return dict(favSvg=make_svg(top, bot, bot, mode="countdown", frac=bot / 60.0), favMeta=f"{label} remaining")
-    if timer["paused_rem"] > 0:
-        top, bot, label = fmt_hms(timer["paused_rem"])
+    if t["paused_rem"] > 0:
+        top, bot, label = fmt_hms(t["paused_rem"])
         return dict(favSvg=make_svg(top, bot, bot, mode="countdown", frac=bot / 60.0), favMeta=f"paused · {label}")
-    total = timer["mins"] * 60
+    total = t["mins"] * 60
     top, bot, label = fmt_hms(total)
     return dict(favSvg=make_svg(top, bot, 0, mode="countdown"), favMeta=f"{label} · ready")
 
-def sw_sigs():
-    if sw["running"]:
-        elapsed = int(time.monotonic() - sw["start"])
+def sw_sigs(sid):
+    s = get_sw(sid)
+    if s["running"]:
+        elapsed = int(time.monotonic() - s["start"])
         mm, ss = divmod(elapsed, 60)
         return dict(favSvg=make_svg(mm, ss, ss, mode="stopwatch"), favMeta=f"{mm:02d}:{ss:02d} elapsed")
-    if sw["paused_elapsed"] > 0:
-        mm, ss = divmod(int(sw["paused_elapsed"]), 60)
+    if s["paused_elapsed"] > 0:
+        mm, ss = divmod(int(s["paused_elapsed"]), 60)
         return dict(favSvg=make_svg(mm, ss, ss, mode="stopwatch"), favMeta=f"paused · {mm:02d}:{ss:02d}")
     return dict(favSvg=make_svg(0, 0, 0, mode="stopwatch"), favMeta="00:00 · ready")
 
 
-def cmd_timer_start():
-    total = timer["paused_rem"] if timer["paused_rem"] > 0 else timer["mins"] * 60
-    timer.update(dict(end=time.monotonic() + total, running=True, paused=False, paused_rem=0))
-    relay.publish("timer.changed", None)
+def cmd_timer_start(sid):
+    t = get_timer(sid)
+    total = t["paused_rem"] if t["paused_rem"] > 0 else t["mins"] * 60
+    t.update(dict(end=time.monotonic() + total, running=True, paused=False, paused_rem=0))
+    set_json(sid, "timer", t)
+    relay.publish(f"timer.{sid}", None)
 
-def cmd_timer_pause():
-    if not timer["running"]: return
-    timer.update(dict(paused_rem=max(0, int(timer["end"] - time.monotonic())), running=False, paused=True))
-    relay.publish("timer.changed", None)
+def cmd_timer_pause(sid):
+    t = get_timer(sid)
+    if not t["running"]: return
+    t.update(dict(paused_rem=max(0, int(t["end"] - time.monotonic())), running=False, paused=True))
+    set_json(sid, "timer", t)
+    relay.publish(f"timer.{sid}", None)
 
-def cmd_timer_reset():
-    timer.update(dict(end=0, running=False, paused=False, paused_rem=0))
-    relay.publish("timer.changed", None)
+def cmd_timer_reset(sid):
+    t = get_timer(sid)
+    t.update(dict(end=0, running=False, paused=False, paused_rem=0))
+    set_json(sid, "timer", t)
+    relay.publish(f"timer.{sid}", None)
 
-def cmd_timer_duration(h, m):
-    timer.update(dict(mins=h * 60 + m, paused_rem=0, running=False, paused=False, end=0))
-    relay.publish("timer.changed", None)
+def cmd_timer_duration(sid, h, m):
+    t = get_timer(sid)
+    t.update(dict(mins=h * 60 + m, paused_rem=0, running=False, paused=False, end=0))
+    set_json(sid, "timer", t)
+    relay.publish(f"timer.{sid}", None)
 
-def cmd_sw_start():
-    sw.update(dict(start=time.monotonic() - sw["paused_elapsed"], running=True, paused=False, paused_elapsed=0))
-    relay.publish("sw.changed", None)
+def cmd_sw_start(sid):
+    s = get_sw(sid)
+    s.update(dict(start=time.monotonic() - s["paused_elapsed"], running=True, paused=False, paused_elapsed=0))
+    set_json(sid, "sw", s)
+    relay.publish(f"sw.{sid}", None)
 
-def cmd_sw_pause():
-    if not sw["running"]: return
-    sw.update(dict(paused_elapsed=time.monotonic() - sw["start"], running=False, paused=True))
-    relay.publish("sw.changed", None)
+def cmd_sw_pause(sid):
+    s = get_sw(sid)
+    if not s["running"]: return
+    s.update(dict(paused_elapsed=time.monotonic() - s["start"], running=False, paused=True))
+    set_json(sid, "sw", s)
+    relay.publish(f"sw.{sid}", None)
 
-def cmd_sw_reset():
-    sw.update(dict(start=0, running=False, paused=False, paused_elapsed=0))
-    relay.publish("sw.changed", None)
+def cmd_sw_reset(sid):
+    s = get_sw(sid)
+    s.update(dict(start=0, running=False, paused=False, paused_elapsed=0))
+    set_json(sid, "sw", s)
+    relay.publish(f"sw.{sid}", None)
 
 
 async def _clock_loop(w):
@@ -116,17 +144,19 @@ async def _clock_loop(w):
             w.sync(clock_sigs())
         await asyncio.sleep(1)
 
-async def _timer_loop(w):
+async def _timer_loop(w, sid):
     async for _ in w.alive():
-        if timer["running"] and timer["end"] - time.monotonic() <= 0:
-            timer.update(dict(running=False))
-            relay.publish("timer.changed", None)
-        w.sync(timer_sigs())
+        t = get_timer(sid)
+        if t["running"] and t["end"] - time.monotonic() <= 0:
+            t.update(dict(running=False))
+            set_json(sid, "timer", t)
+            relay.publish(f"timer.{sid}", None)
+        w.sync(timer_sigs(sid))
         await asyncio.sleep(1)
 
-async def _sw_loop(w):
+async def _sw_loop(w, sid):
     async for _ in w.alive():
-        w.sync(sw_sigs())
+        w.sync(sw_sigs(sid))
         await asyncio.sleep(1)
 
 
@@ -179,8 +209,9 @@ def clock_view():
         P({"class": "meta"}, data.text("$favMeta")),
         active="clock", title="Clock", sigs=clock_sigs())
 
-def timer_view():
-    hrs, mins = timer["mins"] // 60, timer["mins"] % 60
+def timer_view(sid):
+    t = get_timer(sid)
+    hrs, mins = t["mins"] // 60, t["mins"] % 60
     return shell(
         Div({"class": "face"}, data.effect("el.innerHTML = $favSvg"),
             data.init("@get('/timer/stream', {openWhenHidden: true})")),
@@ -195,9 +226,9 @@ def timer_view():
             Button(data.on("click", "@post('/timer/start')"), "Start"),
             Button(data.on("click", "@post('/timer/pause')"), "Pause"),
             Button(data.on("click", "@post('/timer/reset')"), "Reset")),
-        active="timer", title="Timer", sigs=timer_sigs())
+        active="timer", title="Timer", sigs=timer_sigs(sid))
 
-def sw_view():
+def sw_view(sid):
     return shell(
         Div({"class": "face"}, data.effect("el.innerHTML = $favSvg"),
             data.init("@get('/stopwatch/stream', {openWhenHidden: true})")),
@@ -206,45 +237,67 @@ def sw_view():
             Button(data.on("click", "@post('/stopwatch/start')"), "Start"),
             Button(data.on("click", "@post('/stopwatch/pause')"), "Pause"),
             Button(data.on("click", "@post('/stopwatch/reset')"), "Reset")),
-        active="stopwatch", title="Stopwatch", sigs=sw_sigs())
+        active="stopwatch", title="Stopwatch", sigs=sw_sigs(sid))
 
 
-async def h_home(c: Context, w: Writer): w.html(clock_view())
-async def h_timer(c: Context, w: Writer): w.html(timer_view())
-async def h_sw(c: Context, w: Writer): w.html(sw_view())
+async def h_home(c: Context, w: Writer):
+    get_sid(c, w)
+    w.html(clock_view())
+
+async def h_timer(c: Context, w: Writer):
+    sid = get_sid(c, w)
+    w.html(timer_view(sid))
+
+async def h_sw(c: Context, w: Writer):
+    sid = get_sid(c, w)
+    w.html(sw_view(sid))
+
 async def h_clock_stream(c: Context, w: Writer): await _clock_loop(w)
-async def h_timer_stream(c: Context, w: Writer): await _timer_loop(w)
-async def h_sw_stream(c: Context, w: Writer): await _sw_loop(w)
+
+async def h_timer_stream(c: Context, w: Writer):
+    sid = get_sid(c, w)
+    await _timer_loop(w, sid)
+
+async def h_sw_stream(c: Context, w: Writer):
+    sid = get_sid(c, w)
+    await _sw_loop(w, sid)
 
 async def h_timer_start(c: Context, w: Writer):
-    cmd_timer_start()
-    w.sync(timer_sigs())
+    sid = get_sid(c, w)
+    cmd_timer_start(sid)
+    w.sync(timer_sigs(sid))
 
 async def h_timer_pause(c: Context, w: Writer):
-    cmd_timer_pause()
-    w.sync(timer_sigs())
+    sid = get_sid(c, w)
+    cmd_timer_pause(sid)
+    w.sync(timer_sigs(sid))
 
 async def h_timer_reset(c: Context, w: Writer):
-    cmd_timer_reset()
-    w.sync(timer_sigs())
+    sid = get_sid(c, w)
+    cmd_timer_reset(sid)
+    w.sync(timer_sigs(sid))
 
 async def h_timer_duration(c: Context, w: Writer):
+    sid = get_sid(c, w)
     h = max(0, min(99, int(c.req.query.get("h", "0"))))
     m = max(0, min(59, int(c.req.query.get("m", "0"))))
-    cmd_timer_duration(h, m)
-    w.sync(timer_sigs())
+    cmd_timer_duration(sid, h, m)
+    w.sync(timer_sigs(sid))
 
 async def h_sw_start(c: Context, w: Writer):
-    cmd_sw_start()
-    w.sync(sw_sigs())
+    sid = get_sid(c, w)
+    cmd_sw_start(sid)
+    w.sync(sw_sigs(sid))
 
 async def h_sw_pause(c: Context, w: Writer):
-    cmd_sw_pause()
-    w.sync(sw_sigs())
+    sid = get_sid(c, w)
+    cmd_sw_pause(sid)
+    w.sync(sw_sigs(sid))
 
 async def h_sw_reset(c: Context, w: Writer):
-    cmd_sw_reset()
-    w.sync(sw_sigs())
+    sid = get_sid(c, w)
+    cmd_sw_reset(sid)
+    w.sync(sw_sigs(sid))
 
 async def h_health(c: Context, w: Writer): w.text("ok")
 
