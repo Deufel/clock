@@ -119,9 +119,15 @@ def bar_chart_html(tasks):
         e = task_elapsed(t)
         pct = e / total * 100
         if pct < 1: continue
-        c = colors[i % len(colors)]
-        bars.append(f"<div style='width:{pct:.1f}%; background:{c}; height:100%; display:inline-block' title='{t[\"name\"]}: {fmt_elapsed(e)}'></div>")
-    legend = " ".join(f"<span style='font-size:0.75rem; color:#888'><span style='color:{colors[i % len(colors)]}'>●</span> {t['name']} {fmt_elapsed(task_elapsed(t))}</span>" for i, t in enumerate(tasks) if task_elapsed(t) > 0)
+        c, n = colors[i % len(colors)], t["name"]
+        bars.append(f"<div style='width:{pct:.1f}%; background:{c}; height:100%; display:inline-block' title='{n}: {fmt_elapsed(e)}'></div>")
+    items = []
+    for i, t in enumerate(tasks):
+        e = task_elapsed(t)
+        if e <= 0: continue
+        c, n = colors[i % len(colors)], t["name"]
+        items.append(f"<span style='font-size:0.75rem; color:#888'><span style='color:{c}'>●</span> {n} {fmt_elapsed(e)}</span>")
+    legend = " ".join(items)
     return (f"<div style='margin-top:1rem'>"
             f"<div style='width:100%; height:1.2rem; border-radius:0.4rem; overflow:hidden; background:#1a1a1a; display:flex'>{''.join(bars)}</div>"
             f"<div style='margin-top:0.4rem; display:flex; flex-wrap:wrap; gap:0.6rem; justify-content:center'>{legend}</div>"
