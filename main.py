@@ -70,7 +70,7 @@ def make_svg(hour, minute, second=0, mode="time", frac=None, sz=16):
     if mode == "time":
         sec_deg = (second / 60.0) * 360
         sec_r = r * 0.85
-        sec_hand = (f"<g transform='rotate({sec_deg:.1f} {h} {h})' style='animation: spin 60s linear infinite; transform-origin: {h}px {h}px'>"
+        sec_hand = (f"<g style='animation: spin 60s linear infinite; animation-delay: -{second:.2f}s; transform-origin: {h}px {h}px'>"
                     f"<line x1='{h}' y1='{h}' x2='{h}' y2='{h - sec_r:.2f}' stroke='{accent}' stroke-width='0.15' opacity='0.6'/>"
                     f"<circle cx='{h}' cy='{h - sec_r:.2f}' r='0.25' fill='{accent}' opacity='0.8'/></g>")
     style = "<style>@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }</style>" if mode == "time" else ""
