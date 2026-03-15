@@ -103,9 +103,29 @@ def tasks_sigs(sid):
     active = [t for t in tasks if t["track_start"] is not None]
     if active:
         t = active[0]
-        e = fmt_elapsed(task_elapsed(t))
-        return dict(favMeta=f"tracking · {t['name']} · {e}", taskHtml=tasks_html(tasks))
-    return dict(favMeta=f"{len(tasks)} task{'s' if len(tasks) != 1 else ''} · idle", taskHtml=tasks_html(tasks))
+        e = task_elapsed(t)
+        mm, ss = divmod(e, 60)
+        svg = make_svg(mm, ss, ss, mode="stopwatch")
+        return dict(favSvg=svg, favMeta=f"tracking · {t['name']} · {fmt_elapsed(e)}", taskHtml=tasks_html(tasks))
+    return dict(favSvg=clock_sigs()["favSvg"], favMeta=f"{len(tasks)} task{'s' if len(tasks) != 1 else ''} · idle", taskHtml=tasks_html(tasks))
+
+def bar_chart_html(tasks):
+    if not tasks: return ""
+    total = sum(task_elapsed(t) for t in tasks)
+    if total == 0: return ""
+    colors = ["#e54", "#2a2", "#47f", "#f90", "#c4f", "#0cc", "#fa0", "#f47"]
+    bars = []
+    for i, t in enumerate(tasks):
+        e = task_elapsed(t)
+        pct = e / total * 100
+        if pct < 1: continue
+        c = colors[i % len(colors)]
+        bars.append(f"<div style='width:{pct:.1f}%; background:{c}; height:100%; display:inline-block' title='{t[\"name\"]}: {fmt_elapsed(e)}'></div>")
+    legend = " ".join(f"<span style='font-size:0.75rem; color:#888'><span style='color:{colors[i % len(colors)]}'>●</span> {t['name']} {fmt_elapsed(task_elapsed(t))}</span>" for i, t in enumerate(tasks) if task_elapsed(t) > 0)
+    return (f"<div style='margin-top:1rem'>"
+            f"<div style='width:100%; height:1.2rem; border-radius:0.4rem; overflow:hidden; background:#1a1a1a; display:flex'>{''.join(bars)}</div>"
+            f"<div style='margin-top:0.4rem; display:flex; flex-wrap:wrap; gap:0.6rem; justify-content:center'>{legend}</div>"
+            f"</div>")
 
 def tasks_html(tasks):
     if not tasks: return "<p style='color:#555; text-align:center'>no tasks yet</p>"
@@ -124,7 +144,7 @@ def tasks_html(tasks):
             f"<button class='task-btn{btn_cls}' data-on:click=\"{toggle}\">{btn_label}</button>"
             f"<button class='task-btn' data-on:click=\"@post('/tasks/done?id={tid}')\">✓</button>"
             f"</li>")
-    return f"<ul style='list-style:none; padding:0; width:100%'>{''.join(rows)}</ul>"
+    return f"<ul style='list-style:none; padding:0; width:100%'>{''.join(rows)}</ul>{bar_chart_html(tasks)}"
 
 
 def cmd_timer_start(sid):
@@ -310,18 +330,18 @@ def sw_view(sid):
 
 def tasks_view(sid):
     sigs = tasks_sigs(sid)
-    sigs["favSvg"] = clock_sigs()["favSvg"]
     sigs["taskName"] = ""
     return shell(
+        Div({"class": "face"}, data.effect("el.innerHTML = $favSvg"),
+            data.init("@get('/tasks/stream', {openWhenHidden: true})")),
+        P({"class": "meta"}, data.text("$favMeta")),
         Div({"class": "controls", "style": "width: min(80vw, 500px)"},
             Input({"class": "task-input", "type": "text", "placeholder": "new task...",
                    "data-bind": "taskName",
-                   "data-on:keydown__key.enter": "@post('/tasks/add')"}),
+                   "data-on:keydown": "if (event.key === 'Enter') @post('/tasks/add')"}),
             Button(data.on("click", "@post('/tasks/add')"), "Add")),
-        P({"class": "meta"}, data.text("$favMeta")),
         Div({"id": "task-list", "style": "width: min(80vw, 500px)"},
-            data.effect("el.innerHTML = $taskHtml"),
-            data.init("@get('/tasks/stream', {openWhenHidden: true})")),
+            data.effect("el.innerHTML = $taskHtml")),
         active="tasks", title="Tasks", sigs=sigs)
 
 
