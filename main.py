@@ -225,6 +225,60 @@ def cmd_task_done(sid, tid):
     relay.publish(f"tasks.{sid}", None)
 
 
+'''
+ REFACTOR
+'''
+
+def task_row(t):
+    """Render one task as a list item."""
+    tid = t["id"]
+    elapsed = fmt_elapsed(task_elapsed(t))
+    tracking = t["track_start"] is not None
+    toggle_url = f"/tasks/stop?id={tid}" if tracking else f"/tasks/track?id={tid}"
+    toggle_label = "Stop" if tracking else "Track"
+    toggle_cls = "task-btn on" if tracking else "task-btn"
+    return Li({"class": "task-row"},
+        Span({"class": "task-name"}, t["name"]),
+        Span({"class": "task-time"}, elapsed),
+        Button({"class": toggle_cls, "data-url": toggle_url}, toggle_label),
+        Button({"class": "task-btn", "data-url": f"/tasks/done?id={tid}"}, "✓"))
+
+def task_list(tasks):
+    """Render all tasks as an unordered list."""
+    if not tasks:
+        return P({"class": "task-empty"}, "no tasks yet")
+    return Ul({"class": "task-list"}, *[task_row(t) for t in tasks])
+
+def task_bar(tasks):
+    """Render a proportional time bar with legend."""
+    total = sum(task_elapsed(t) for t in tasks)
+    if total == 0: return Fragment()
+    colors = ["#e54", "#2a2", "#47f", "#f90", "#c4f", "#0cc", "#fa0", "#f47"]
+    bars = []
+    legend = []
+    for i, t in enumerate(tasks):
+        e = task_elapsed(t)
+        if e <= 0: continue
+        pct = e / total * 100
+        color = colors[i % len(colors)]
+        bars.append(Div({"class": "bar-seg", "style": f"width:{pct:.1f}%;background:{color}",
+                         "title": f"{t['name']}: {fmt_elapsed(e)}"}))
+        legend.append(Span({"class": "bar-legend-item"},
+            Span({"style": f"color:{color}"}, "●"), f" {t['name']} {fmt_elapsed(e)}"))
+    return Div({"class": "task-bar"},
+        Div({"class": "bar-track"}, *bars),
+        Div({"class": "bar-legend"}, *legend))
+
+def task_panel(tasks):
+    """Full tasks content: list + bar chart."""
+    return Fragment(task_list(tasks), task_bar(tasks))
+
+
+
+
+
+
+
 async def _clock_loop(w):
     async for _ in w.alive():
         w.sync(clock_sigs())
@@ -247,7 +301,9 @@ async def _sw_loop(w, sid):
 
 async def _tasks_loop(w, sid):
     async for _ in w.alive():
-        w.sync(tasks_sigs(sid))
+        tasks = get_tasks(sid)
+        w.patch(SafeString(str(task_panel(tasks))), mode="inner", selector="#task-list")
+        w.sync(tasks_sigs(sid))  # still needed for favicon/meta
         await asyncio.sleep(1)
 
 
@@ -258,6 +314,16 @@ TASK_CSS = """
 @media (prefers-color-scheme: light) { .task-input { background: #fff; color: #222; border-color: #ddd; } }
 .task-input:focus { outline: 2px solid #e54; outline-offset: 2px; }
 .task-time { color: #888; font-size: 0.85rem; font-family: 'JetBrains Mono', 'SF Mono', monospace; min-width: 6rem; text-align: right; }
+
+.task-row { display: flex; align-items: center; gap: 0.75rem; padding: 0.5rem 0; border-bottom: 1px solid #222; }
+.task-name { flex: 1; font-size: 1rem; }
+.task-empty { color: #555; text-align: center; }
+.task-list { list-style: none; padding: 0; width: 100%; }
+.bar-track { width: 100%; height: 1.2rem; border-radius: 0.4rem; overflow: hidden; background: #1a1a1a; display: flex; }
+.bar-seg { height: 100%; }
+.bar-legend { margin-top: 0.4rem; display: flex; flex-wrap: wrap; gap: 0.6rem; justify-content: center; }
+.bar-legend-item { font-size: 0.75rem; color: #888; }
+.task-bar { margin-top: 1rem; }
 """
 
 CSS = """
@@ -348,8 +414,7 @@ def tasks_view(sid):
                    "data-on:keydown": "if (event.key === 'Enter') @post('/tasks/add')"}),
             Button(data.on("click", "@post('/tasks/add')"), "Add")),
         Div({"id": "task-list", "style": "width:100%",
-             "data-on:click": "const btn = evt.target.closest('[data-url]'); if (btn) @post(btn.dataset.url)"},
-            data.effect("el.innerHTML = $taskHtml")),
+             "data-on:click": "const btn = evt.target.closest('[data-url]'); if (btn) @post(btn.dataset.url)"}),
         active="tasks", title="Tasks", sigs=sigs, stream_url="/tasks/stream")
 
 
@@ -456,7 +521,7 @@ async def bootstrap(app: Stario, span: Span):
     app.get("/clock/stream", h_clock_stream)
     app.get("/timer/stream", h_timer_stream)
     app.get("/stopwatch/stream", h_sw_stream)
-    app.get("/tasks/stream", h_tasks_stream)
+    app.get("/asks/stream", h_tasks_stream)
     app.post("/timer/start", h_timer_start)
     app.post("/timer/pause", h_timer_pause)
     app.post("/timer/reset", h_timer_reset)
