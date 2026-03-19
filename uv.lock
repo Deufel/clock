@@ -102,12 +102,14 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "apsw" },
+    { name = "html-tags" },
     { name = "stario" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "apsw", specifier = ">=3.51.3.0" },
+    { name = "html-tags", specifier = ">=0.0.7" },
     { name = "stario", specifier = ">=2.3.0" },
 ]
 
@@ -118,6 +120,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/d8/53/6f443c9a4a8358a93a6792e2acffb9d9d5cb0a5cfd8802644b7b1c9a02e4/colorama-0.4.6.tar.gz", hash = "sha256:08695f5cb7ed6e0531a20572697297273c47b8cae5a63ffc6d6ed5c201be6e44", size = 27697, upload-time = "2022-10-25T02:36:22.414Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d1/d6/3965ed04c63042e047cb6a3e6ed1a63a35087b6a609aa3a15ed8ac56c221/colorama-0.4.6-py2.py3-none-any.whl", hash = "sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6", size = 25335, upload-time = "2022-10-25T02:36:20.889Z" },
+]
+
+[[package]]
+name = "html-tags"
+version = "0.0.7"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e1/20/4b6361c774107de20c3759162a3152f4e09a2079cbb58c1b90e078a017dc/html_tags-0.0.7.tar.gz", hash = "sha256:c5070bcdc5d30b9d29eed5e6dfd93c900e65462b488cbd91fe9e375ccb7a15c7", size = 3408, upload-time = "2026-03-18T04:27:20.201Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3d/42/2c411d4c5944b1f791f255d750834cdd719f5de1c6931415f543c6d1e302/html_tags-0.0.7-py3-none-any.whl", hash = "sha256:f9ac67ec4fa2a2d0e3a316bc39a467c464f48fa9a4c018be258875c65e4b65e1", size = 4504, upload-time = "2026-03-18T04:27:19.024Z" },
 ]
 
 [[package]]

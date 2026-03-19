@@ -1,10 +1,11 @@
 import asyncio, time, math
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from stario import Stario, Span, Context, Writer, data
-from stario.html import (Html, Head, Meta, Title, Script, Style, Link, Body,
-                          Div, H1, H3, P, Button, Input, Span as HSpan, Small, A, Nav, Ul, Li, Form)
+from stario import Stario, Context, Writer, data
 from stario.relay import Relay
+from html_tags import setup_tags
+from stario.html import SafeString
+setup_tags()
 from db import (new_session, valid_session, get_json, set_json,
                 add_task, get_tasks, get_task, task_start_tracking,
                 task_stop_tracking, task_complete, task_elapsed, stop_all_tracking)
@@ -149,14 +150,14 @@ def tasks_html(tasks):
         e = fmt_elapsed(task_elapsed(t))
         tracking = t["track_start"] is not None
         tid = t["id"]
-        toggle = f"@post('/tasks/stop?id={tid}')" if tracking else f"@post('/tasks/track?id={tid}')"
+        toggle_url = f"/tasks/stop?id={tid}" if tracking else f"/tasks/track?id={tid}"
         btn_label, btn_cls = ("Stop", " on") if tracking else ("Track", "")
         rows.append(
             f"<li style='display:flex; align-items:center; gap:0.75rem; padding:0.5rem 0; border-bottom:1px solid #222'>"
             f"<span style='flex:1; font-size:1rem'>{t['name']}</span>"
-            f"<span style='color:#888; font-size:0.85rem; font-family:{MONO}; min-width:6rem; text-align:right'>{e}</span>"
-            f"<button class='task-btn{btn_cls}' data-on:click=\"{toggle}\">{btn_label}</button>"
-            f"<button class='task-btn' data-on:click=\"@post('/tasks/done?id={tid}')\">✓</button>"
+            f"<span class='task-time'>{e}</span>"
+            f"<button class='task-btn{btn_cls}' data-url='{toggle_url}'>{btn_label}</button>"
+            f"<button class='task-btn' data-url='/tasks/done?id={tid}'>✓</button>"
             f"</li>")
     return f"<ul style='list-style:none; padding:0; width:100%'>{''.join(rows)}</ul>{bar_chart_html(tasks)}"
 
@@ -256,6 +257,7 @@ TASK_CSS = """
 .task-input { padding: 0.6rem; border-radius: 0.5rem; border: 1px solid #333; background: #151515; color: #fff; font: inherit; flex: 1; font-size: 0.95rem; }
 @media (prefers-color-scheme: light) { .task-input { background: #fff; color: #222; border-color: #ddd; } }
 .task-input:focus { outline: 2px solid #e54; outline-offset: 2px; }
+.task-time { color: #888; font-size: 0.85rem; font-family: 'JetBrains Mono', 'SF Mono', monospace; min-width: 6rem; text-align: right; }
 """
 
 CSS = """
@@ -304,7 +306,7 @@ def shell(*content_children, title="Clock", active="clock", sigs=None, stream_ur
                     A({"href": "/stopwatch", "class": "on" if active == "stopwatch" else ""}, "Stopwatch"),
                     A({"href": "/tasks", "class": "on" if active == "tasks" else ""}, "Tasks")),
                 Div({"class": "clock-row"},
-                    HSpan({"style": "display:none"}, data.effect(FAVICON_EFFECT)),
+                    Span({"style": "display:none"}, data.effect(FAVICON_EFFECT)),
                     Div({"class": "face"}, data.effect("el.innerHTML = $favSvg"),
                         data.init(f"@get('{stream_url}', {{openWhenHidden: true}})")),
                     P({"class": "meta"}, data.text("$favMeta"))),
@@ -345,25 +347,27 @@ def tasks_view(sid):
                    "data-bind": "taskName",
                    "data-on:keydown": "if (event.key === 'Enter') @post('/tasks/add')"}),
             Button(data.on("click", "@post('/tasks/add')"), "Add")),
-        Div({"id": "task-list", "style": "width:100%"}, data.effect("el.innerHTML = $taskHtml")),
+        Div({"id": "task-list", "style": "width:100%",
+             "data-on:click": "const btn = evt.target.closest('[data-url]'); if (btn) @post(btn.dataset.url)"},
+            data.effect("el.innerHTML = $taskHtml")),
         active="tasks", title="Tasks", sigs=sigs, stream_url="/tasks/stream")
 
 
 async def h_home(c: Context, w: Writer):
     get_sid(c, w)
-    w.html(clock_view())
+    w.html(SafeString(str(clock_view())))
 
 async def h_timer(c: Context, w: Writer):
     sid = get_sid(c, w)
-    w.html(timer_view(sid))
+    w.html(SafeString(str(timer_view(sid))))
 
 async def h_sw(c: Context, w: Writer):
     sid = get_sid(c, w)
-    w.html(sw_view(sid))
+    w.html(SafeString(str(sw_view(sid))))
 
 async def h_tasks(c: Context, w: Writer):
     sid = get_sid(c, w)
-    w.html(tasks_view(sid))
+    w.html(SafeString(str(tasks_view(sid))))
 
 async def h_clock_stream(c: Context, w: Writer): await _clock_loop(w)
 
