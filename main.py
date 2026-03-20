@@ -24,6 +24,7 @@ def get_sid(c, w):
     return sid
 
 def get_clock_rate(sid): return get_json(sid, "clock_rate", lambda: 1.0)
+def get_tasks_rate(sid): return get_json(sid, "tasks_rate", lambda: 1.0)
 
 def lerp(a, b, t): return a + (b - a) * t
 def to12(h): return (h % 12 or 12, "AM" if h < 12 else "PM")
@@ -153,7 +154,7 @@ async def _tasks_loop(w, sid):
         tasks = get_tasks(sid)
         w.patch(SafeString(str(task_panel(tasks))), mode="inner", selector="#task-list")
         w.sync(tasks_sigs(sid))
-        await asyncio.sleep(1)
+        await asyncio.sleep(get_tasks_rate(sid))
 
 TASK_CSS = """
 .task-btn { padding: 0.4rem 0.8rem; font-size: 0.8rem; min-width: 3.5rem; }
@@ -231,7 +232,7 @@ def clock_view(sid):
     return shell(
         Div({"class": "rate-ctrl"},
             Label({"for": "rate"}, "Update rate: "),
-            Input({"type": "range", "id": "rate", "min": "50", "max": "2000", "step": "50",
+            Input({"type": "range", "id": "rate", "min": "16", "max": "2000", "step": "1",
                    "data-bind": "clockRate", "data-on:input": "@post('/clock/rate')"}),
             Span({"class": "rate-label"}, data.text("$clockRate + 'ms'"))),
         active="clock", title="Clock", sigs=sigs, stream_url="/clock/stream")
@@ -239,6 +240,7 @@ def clock_view(sid):
 def tasks_view(sid):
     sigs = tasks_sigs(sid)
     sigs["taskName"] = ""
+    sigs["tasksRate"] = int(get_tasks_rate(sid) * 1000)
     return shell(
         Div({"class": "controls", "style": "width:100%"},
             Input({"class": "task-input", "type": "text", "placeholder": "new task...",
@@ -247,6 +249,11 @@ def tasks_view(sid):
             Button(data.on("click", "@post('/tasks/add')"), "Add")),
         Div({"id": "task-list", "style": "width:100%",
              "data-on:click": "const btn = evt.target.closest('[data-url]'); if (btn) @post(btn.dataset.url)"}),
+        Div({"class": "rate-ctrl"},
+            Label({"for": "trate"}, "Update rate: "),
+            Input({"type": "range", "id": "trate", "min": "16", "max": "2000", "step": "1",
+                   "data-bind": "tasksRate", "data-on:input": "@post('/tasks/rate')"}),
+            Span({"class": "rate-label"}, data.text("$tasksRate + 'ms'"))),
         active="tasks", title="Tasks", sigs=sigs, stream_url="/tasks/stream")
 
 async def h_tasks(c: Context, w: Writer):
@@ -264,8 +271,14 @@ async def h_clock_stream(c: Context, w: Writer):
 async def h_clock_rate(c: Context, w: Writer):
     sid = get_sid(c, w)
     s = await c.signals()
-    rate = max(0.05, min(2.0, int(s.get("clockRate", 1000)) / 1000.0))
+    rate = max(0.016, min(2.0, int(s.get("clockRate", 1000)) / 1000.0))
     set_json(sid, "clock_rate", rate)
+
+async def h_tasks_rate(c: Context, w: Writer):
+    sid = get_sid(c, w)
+    s = await c.signals()
+    rate = max(0.016, min(2.0, int(s.get("tasksRate", 1000)) / 1000.0))
+    set_json(sid, "tasks_rate", rate)
 
 async def h_tasks_stream(c: Context, w: Writer):
     sid = get_sid(c, w)
@@ -312,6 +325,7 @@ async def bootstrap(app: Stario, span: Span):
     app.get("/clock/stream", h_clock_stream)
     app.post("/clock/rate", h_clock_rate)
     app.get("/tasks/stream", h_tasks_stream)
+    app.post("/tasks/rate", h_tasks_rate)
     app.post("/tasks/add", h_task_add)
     app.post("/tasks/track", h_task_track)
     app.post("/tasks/stop", h_task_stop)
