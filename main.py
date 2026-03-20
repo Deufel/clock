@@ -99,7 +99,7 @@ def task_row(t):
         Span({"class": "task-name", "contenteditable": "true", "data-original": t["name"],
               "data-on:blur": f"@post('/tasks/rename?id={tid}&name=' + encodeURIComponent(el.innerText.trim()))",
               "data-on:keydown": "if(event.key==='Enter'){event.preventDefault();el.blur()} if(event.key==='Escape'){el.innerText=el.dataset.original;el.blur()}"}, t["name"]),
-        Span({"class": "task-time"}, elapsed),
+        Span({"class": "task-time", "id": f"task-time-{tid}"}, elapsed),
         Button({"class": toggle_cls, "data-url": toggle_url}, toggle_label),
         Button({"class": "task-btn", "data-url": f"/tasks/done?id={tid}"}, "✓"))
 
@@ -124,7 +124,7 @@ def task_bar(tasks):
 
 def task_panel(tasks):
     "Full tasks content: list + bar chart"
-    return Div(task_list(tasks), task_bar(tasks))
+    return Div(task_list(tasks), Div({"id": "task-bar"}, task_bar(tasks)))
 
 def cmd_task_add(sid, name):
     add_task(sid, name.strip())
@@ -155,7 +155,9 @@ async def _clock_loop(w, sid):
 async def _tasks_loop(w, sid):
     async for _ in w.alive():
         tasks = get_tasks(sid)
-        w.patch(SafeString(str(task_panel(tasks))), mode="morph", selector="#task-list")
+        for t in tasks:
+            w.patch(SafeString(fmt_elapsed(task_elapsed(t))), mode="inner", selector=f"#task-time-{t['id']}")
+        w.patch(SafeString(str(task_bar(tasks))), mode="inner", selector="#task-bar")
         w.sync(tasks_sigs(sid))
         await asyncio.sleep(get_tasks_rate(sid))
 
@@ -293,24 +295,32 @@ async def h_task_add(c: Context, w: Writer):
     name = s.get("taskName", "").strip()
     if name:
         cmd_task_add(sid, name)
+        tasks = get_tasks(sid)
+        w.patch(SafeString(str(task_panel(tasks))), mode="inner", selector="#task-list")
         w.sync({"taskName": "", **tasks_sigs(sid)})
 
 async def h_task_track(c: Context, w: Writer):
     sid = get_sid(c, w)
     tid = int(c.req.query.get("id", "0"))
     cmd_task_track(sid, tid)
+    tasks = get_tasks(sid)
+    w.patch(SafeString(str(task_panel(tasks))), mode="inner", selector="#task-list")
     w.sync(tasks_sigs(sid))
 
 async def h_task_stop(c: Context, w: Writer):
     sid = get_sid(c, w)
     tid = int(c.req.query.get("id", "0"))
     cmd_task_stop(sid, tid)
+    tasks = get_tasks(sid)
+    w.patch(SafeString(str(task_panel(tasks))), mode="inner", selector="#task-list")
     w.sync(tasks_sigs(sid))
 
 async def h_task_done(c: Context, w: Writer):
     sid = get_sid(c, w)
     tid = int(c.req.query.get("id", "0"))
     cmd_task_done(sid, tid)
+    tasks = get_tasks(sid)
+    w.patch(SafeString(str(task_panel(tasks))), mode="inner", selector="#task-list")
     w.sync(tasks_sigs(sid))
 
 async def h_task_rename(c: Context, w: Writer):
@@ -318,6 +328,8 @@ async def h_task_rename(c: Context, w: Writer):
     tid = int(c.req.query.get("id", "0"))
     name = c.req.query.get("name", "").strip()
     if name: cmd_task_rename(sid, tid, name)
+    tasks = get_tasks(sid)
+    w.patch(SafeString(str(task_panel(tasks))), mode="inner", selector="#task-list")
     w.sync(tasks_sigs(sid))
 
 async def h_health(c: Context, w: Writer): w.text("ok")
