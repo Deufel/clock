@@ -65,6 +65,8 @@ def task_elapsed(t):
     if t["track_start"] is not None: e += time.monotonic() - t["track_start"]
     return int(e)
 
+def rename_task(tid, name): db.execute("UPDATE tasks SET name=? WHERE id=?", (name, tid))
+
 def stop_all_tracking(sid):
     for t in get_tasks(sid):
         if t["track_start"] is not None: task_stop_tracking(t["id"])
