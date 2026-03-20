@@ -63,7 +63,7 @@ def task_complete(tid):
 def task_elapsed(t):
     e = t["elapsed"]
     if t["track_start"] is not None: e += time.monotonic() - t["track_start"]
-    return int(e)
+    return e
 
 def rename_task(tid, name): db.execute("UPDATE tasks SET name=? WHERE id=?", (name, tid))
 

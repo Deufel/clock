@@ -41,10 +41,11 @@ def time_bg(h, m):
 
 def fmt_elapsed(secs):
     if secs >= 3600:
-        hh, rem = divmod(secs, 3600)
-        return f"{hh}h {rem//60:02d}m {rem%60:02d}s"
-    mm, ss = divmod(secs, 60)
-    return f"{mm:02d}:{ss:02d}"
+        hh, rem = divmod(int(secs), 3600)
+        return f"{hh}h {rem//60:02d}m {rem%60:02d}.{int(secs*100)%100:02d}s"
+    mm = int(secs) // 60
+    ss = secs - mm * 60
+    return f"{mm:02d}:{ss:05.2f}"
 
 def make_svg(hour, minute, second=0, tracking=False, frac=None, sz=16):
     h = sz / 2
@@ -61,11 +62,13 @@ def make_svg(hour, minute, second=0, tracking=False, frac=None, sz=16):
     txt = f"<text x='{h}' y='{h+sz*0.03}' text-anchor='middle' dominant-baseline='central' font-size='{fs:.1f}' font-family=\"{FONT}\" font-weight='700' fill='#fff'>{h12}</text>"
     sec_hand = ""
     if not tracking:
+        sec_deg = (second / 60.0) * 360
         sec_r = r * 0.85
-        sec_hand = (f"<g style='animation: spin 60s linear infinite; animation-delay: -{second:.2f}s; transform-origin: {h}px {h}px'>"
-                    f"<line x1='{h}' y1='{h}' x2='{h}' y2='{h - sec_r:.2f}' stroke='{accent}' stroke-width='0.15' opacity='0.6'/>"
-                    f"<circle cx='{h}' cy='{h - sec_r:.2f}' r='0.25' fill='{accent}' opacity='0.8'/></g>")
-    style = "<style>@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }</style>" if not tracking else ""
+        sx = h + sec_r * math.sin(math.radians(sec_deg))
+        sy = h - sec_r * math.cos(math.radians(sec_deg))
+        sec_hand = (f"<line x1='{h}' y1='{h}' x2='{sx:.2f}' y2='{sy:.2f}' stroke='{accent}' stroke-width='0.15' opacity='0.6'/>"
+                    f"<circle cx='{sx:.2f}' cy='{sy:.2f}' r='0.25' fill='{accent}' opacity='0.8'/>")
+    style = ""
     return f"<svg viewBox='0 0 {sz} {sz}' xmlns='http://www.w3.org/2000/svg'>{style}<defs><clipPath id='c'><rect width='{sz}' height='{sz}' rx='{rx:.1f}'/></clipPath></defs><g clip-path='url(#c)'><rect width='{sz}' height='{sz}' fill='{bg}'/></g>{track}{ring}{sec_hand}{txt}</svg>"
 
 def clock_sigs():
