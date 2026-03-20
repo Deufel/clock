@@ -118,7 +118,7 @@ def task_bar(tasks):
 
 def task_panel(tasks):
     "Full tasks content: list + bar chart"
-    return Fragment(task_list(tasks), task_bar(tasks))
+    return Div(task_list(tasks), task_bar(tasks))
 
 def cmd_task_add(sid, name):
     add_task(sid, name.strip())
