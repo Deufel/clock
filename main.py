@@ -155,7 +155,7 @@ async def _clock_loop(w, sid):
 async def _tasks_loop(w, sid):
     async for _ in w.alive():
         tasks = get_tasks(sid)
-        w.patch(SafeString(str(task_panel(tasks))), mode="inner", selector="#task-list")
+        w.patch(SafeString(str(task_panel(tasks))), mode="morph", selector="#task-list")
         w.sync(tasks_sigs(sid))
         await asyncio.sleep(get_tasks_rate(sid))
 
