@@ -105,7 +105,7 @@ def task_list(tasks):
 def task_bar(tasks):
     "Render a proportional time bar with legend"
     total = sum(task_elapsed(t) for t in tasks)
-    if total == 0: return Fragment()
+    if total == 0: return Span()
     colors = ["#e54", "#2a2", "#47f", "#f90", "#c4f", "#0cc", "#fa0", "#f47"]
     bars, legend = [], []
     for i, t in enumerate(tasks):
