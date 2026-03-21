@@ -143,8 +143,9 @@ def task_row(t):
     toggle_label = "Stop" if tracking else "Track"
     toggle_cls = "task-btn on" if tracking else "task-btn"
     return Li({"class": "task-row"},
-        Span({"class": "task-name", "contenteditable": "true", "data-attr:data-ignore-morph": "document.activeElement === el", "data-original": t["name"],
-              "data-on:blur": f"@post('/tasks/rename?id={tid}&name=' + encodeURIComponent(el.innerText.trim()))",
+        Span({"class": "task-name", "contenteditable": "true", "data-original": t["name"],
+              "data-on:focus": "el.setAttribute('data-ignore-morph', '')",
+              "data-on:blur": f"el.removeAttribute('data-ignore-morph'); @post('/tasks/rename?id={tid}&name=' + encodeURIComponent(el.innerText.trim()))",
               "data-on:keydown": "if(event.key==='Enter'){event.preventDefault();el.blur()} if(event.key==='Escape'){el.innerText=el.dataset.original;el.blur()}"}, t["name"]),
         Span({"class": "task-time", "id": f"task-time-{tid}"}, elapsed),
         Button({"class": toggle_cls, "data-url": toggle_url}, toggle_label),
