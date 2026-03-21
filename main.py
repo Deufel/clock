@@ -230,19 +230,22 @@ def rate_toggle(current_rate):
 
 
 async def _tasks_ticker(sid):
+    sub = relay.subscribe(f"tasks.{sid}.rate")
+    rate_event = asyncio.ensure_future(sub.__anext__())
     while True:
         rate = get_tasks_rate(sid)
         if rate == 0:
-            await asyncio.sleep(0.5)
+            # Off — just wait for a rate change event
+            await rate_event
+            rate_event = asyncio.ensure_future(sub.__anext__())
             continue
-        elapsed = 0.0
-        while elapsed < rate:
-            chunk = min(0.25, rate - elapsed)
-            await asyncio.sleep(chunk)
-            elapsed += chunk
-            new_rate = get_tasks_rate(sid)
-            if new_rate != rate:
-                break
+        # Race: either the sleep completes or a rate change arrives
+        sleep = asyncio.ensure_future(asyncio.sleep(rate))
+        done, _ = await asyncio.wait({sleep, rate_event}, return_when=asyncio.FIRST_COMPLETED)
+        if rate_event in done:
+            sleep.cancel()
+            rate_event = asyncio.ensure_future(sub.__anext__())
+            continue  # restart with new rate, don't tick
         relay.publish(f"tasks.{sid}.tick", None)
 
 async def _tasks_loop(w, sid):
@@ -472,6 +475,7 @@ async def h_tasks_rate(c: Context, w: Writer):
     rate = RATE_MAP.get(key, 1.0)
     set_json(sid, "tasks_rate", rate)
     w.patch(safe(rate_toggle(rate)), mode="inner", selector="#rate-toggle")
+    relay.publish(f"tasks.{sid}.rate", None)
     relay.publish(f"tasks.{sid}.update", None)
 
 async def h_tasks_stream(c: Context, w: Writer):
