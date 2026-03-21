@@ -60,7 +60,7 @@ Every device with an open connection gets the update. No polling. No WebSockets.
 
 **SQLite over Postgres** — One file. No network round-trips. Litestream gives durability. For a single-server app, there's nothing faster.
 
-**html-tags over templates** — Python functions compose. Strings concatenate. Functions win.
+**[html-tags](https://pypi.org/project/html-tags/)** — a small HTML generation library. Built during this project, published to PyPI. Composes like functions, escapes by default, supports the `__html__` protocol for interop with Jinja2, Django, and MarkupSafe.
 
 ## License
 
