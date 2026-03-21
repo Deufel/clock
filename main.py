@@ -352,7 +352,11 @@ def tasks_view(sid):
             Span({"class": "task-input", "contenteditable": "true", "data-ignore-morph": True,
                   "role": "textbox", "aria-label": "New task name",
                   "data-on:keydown": "if(event.key==='Enter'){event.preventDefault(); let n=el.innerText.trim(); if(n){@post('/tasks/add?name='+encodeURIComponent(n))} el.innerText=''}"}),
+<<<<<<< HEAD
             Button({"data-on:click": "var inp=el.closest('.controls').querySelector('[contenteditable]'); var n=inp.innerText.trim(); if(n){@post('/tasks/add?name='+encodeURIComponent(n))} inp.innerText=''"}, "Add")),
+=======
+            Button({"data-on:click": "let inp=el.closest('.controls').querySelector('[contenteditable]'); let n=inp.innerText.trim(); if(n){@post('/tasks/add?name='+encodeURIComponent(n)); inp.innerText=''}"}, "Add")),
+>>>>>>> c4f3f64 (fix: add button)
         Div({"id": "task-list", "style": "width:100%",
              "data-on:click": "const btn = evt.target.closest('[data-url]'); if (btn) @post(btn.dataset.url)"}),
         Div({"id": "rate-toggle"}, rate_toggle(get_tasks_rate(sid))),
