@@ -298,6 +298,10 @@ body { font-family: Inter, system-ui, sans-serif; background: #0a0a0a; color: #e
 .app-logo { display: flex; align-items: center; gap: 0.5rem; font-size: 1.25rem; font-weight: 700; color: #eee; text-decoration: none; }
 @media (prefers-color-scheme: light) { .app-logo { color: #222; } }
 .app-logo svg { opacity: 0.8; }
+.header-actions { display: flex; align-items: center; gap: 1rem; }
+.auth-link { color: #888; font-size: 0.8rem; text-decoration: none; transition: color 0.15s; }
+.auth-link:hover { color: #eee; }
+@media (prefers-color-scheme: light) { .auth-link:hover { color: #222; } }
 .gh-link { color: #666; transition: color 0.15s; }
 .gh-link:hover { color: #eee; }
 @media (prefers-color-scheme: light) { .gh-link:hover { color: #222; } }
@@ -318,7 +322,7 @@ button.on { background: #e54; border-color: #e54; color: #fff; }
 
 EFFECTS = "if($_favEnabled) document.querySelector('#favicon').href = 'data:image/svg+xml,' + encodeURIComponent($favSvg); document.title = $title;"
 
-def shell(*content_children, title="Tasks", sigs=None, stream_url="/tasks/stream", show_clock=False):
+def shell(*content_children, title="Tasks", sigs=None, stream_url="/tasks/stream", show_clock=False, user=None):
     if sigs is None: sigs = {}
     sigs["_favEnabled"] = True
     sigs["showClock"] = show_clock
@@ -336,7 +340,9 @@ def shell(*content_children, title="Tasks", sigs=None, stream_url="/tasks/stream
                     data.init(f"@get('{stream_url}', {{openWhenHidden: true}})")),
                 Div({"class": "app-header"},
                     Span({"class": "app-logo"}, SafeString(LOGO_SVG), "Timer"),
-                    A({"href": "https://github.com/Deufel/clock", "target": "_blank", "class": "gh-link", "aria-label": "Source code"}, SafeString(GH_SVG))),
+                    Div({"class": "header-actions"},
+                        A({"href": "/logout", "class": "auth-link"}, "Sign out") if user else A({"href": "/oauth/google", "class": "auth-link"}, "Sign in"),
+                        A({"href": "https://github.com/Deufel/clock", "target": "_blank", "class": "gh-link", "aria-label": "Source code"}, SafeString(GH_SVG)))),
                 P({"class": "meta"}, data.text("$favMeta")),
                 Div({"class": "content"}, *content_children),
                 Div({"class": "settings"},
@@ -344,7 +350,7 @@ def shell(*content_children, title="Tasks", sigs=None, stream_url="/tasks/stream
                     Label({"class": "setting"}, Input({"type": "checkbox", "data-bind": "showClock",
                         "data-on:change": "@post('/tasks/show-clock')"}), "Clock")))))
 
-def tasks_view(sid):
+def tasks_view(sid, user=None):
     sigs = tasks_sigs(sid)
     show_clock = get_show_clock(sid)
     return shell(
@@ -356,11 +362,12 @@ def tasks_view(sid):
         Div({"id": "task-list", "style": "width:100%",
              "data-on:click": "const btn = evt.target.closest('[data-url]'); if (btn) @post(btn.dataset.url)"}),
         Div({"id": "rate-toggle"}, rate_toggle(get_tasks_rate(sid))),
-        sigs=sigs, show_clock=show_clock)
+        sigs=sigs, show_clock=show_clock, user=user)
 
 async def h_tasks(c: Context, w: Writer):
     sid = get_sid(c, w)
-    w.html(safe(tasks_view(sid)))
+    user = get_session_user(sid)
+    w.html(safe(tasks_view(sid, user)))
 
 LANDING_CSS = """
 .landing { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2rem; min-height: 100svh; padding: 2rem; }
