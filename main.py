@@ -142,11 +142,24 @@ def task_row(t):
     toggle_url = f"/tasks/stop?id={tid}" if tracking else f"/tasks/track?id={tid}"
     toggle_label = "Stop" if tracking else "Track"
     toggle_cls = "task-btn on" if tracking else "task-btn"
-    return Li({"class": "task-row"},
-        Span({"class": "task-name", "contenteditable": "true", "data-original": t["name"],
-              "data-on:focus": "el.setAttribute('data-ignore-morph', '')",
-              "data-on:blur": f"el.removeAttribute('data-ignore-morph'); @post('/tasks/rename?id={tid}&name=' + encodeURIComponent(el.innerText.trim()))",
-              "data-on:keydown": "if(event.key==='Enter'){event.preventDefault();el.blur()} if(event.key==='Escape'){el.innerText=el.dataset.original;el.blur()}"}, t["name"]),
+    return Li({"class": "task-row", "id": f"task-row-{tid}"},
+        Span({"class": "task-name", "data-on:click": f"@post('/tasks/edit?id={tid}')"}, t["name"]),
+        Span({"class": "task-time", "id": f"task-time-{tid}"}, elapsed),
+        Button({"class": toggle_cls, "data-url": toggle_url}, toggle_label),
+        Button({"class": "task-btn", "data-url": f"/tasks/done?id={tid}"}, "✓"))
+
+def task_row_editing(t):
+    "Render a task row with an editable name"
+    tid = t["id"]
+    elapsed = fmt_elapsed(task_elapsed(t))
+    tracking = t["track_start"] is not None
+    toggle_url = f"/tasks/stop?id={tid}" if tracking else f"/tasks/track?id={tid}"
+    toggle_label = "Stop" if tracking else "Track"
+    toggle_cls = "task-btn on" if tracking else "task-btn"
+    return Li({"class": "task-row", "id": f"task-row-{tid}", "data-ignore-morph": True},
+        Span({"class": "task-name editing", "contenteditable": "true",
+              "data-on:blur": f"@post('/tasks/rename?id={tid}&name=' + encodeURIComponent(el.innerText.trim()))",
+              "data-on:keydown": "if(event.key==='Enter'){event.preventDefault();el.blur()} if(event.key==='Escape'){el.blur()}"}, t["name"]),
         Span({"class": "task-time", "id": f"task-time-{tid}"}, elapsed),
         Button({"class": toggle_cls, "data-url": toggle_url}, toggle_label),
         Button({"class": "task-btn", "data-url": f"/tasks/done?id={tid}"}, "✓"))
@@ -267,7 +280,8 @@ TASK_CSS = """
 .task-input:focus { outline: 2px solid #e54; outline-offset: 2px; }
 .task-time { color: #888; font-size: 0.85rem; font-family: 'JetBrains Mono', 'SF Mono', monospace; min-width: 6rem; text-align: right; }
 .task-row { display: flex; align-items: center; gap: 0.75rem; padding: 0.5rem 0; border-bottom: 1px solid #222; }
-.task-name { flex: 1; font-size: 1rem; cursor: text; outline: none; border-radius: 0.25rem; padding: 0.1rem 0.3rem; }
+.task-name { flex: 1; font-size: 1rem; cursor: pointer; outline: none; border-radius: 0.25rem; padding: 0.1rem 0.3rem; }
+.task-name.editing { cursor: text; }
 .task-name:focus { background: #1a1a1a; outline: 2px solid #e54; outline-offset: 2px; }
 @media (prefers-color-scheme: light) { .task-name:focus { background: #f0f0f0; } }
 .task-empty { color: #555; text-align: center; }
@@ -495,11 +509,19 @@ async def h_task_done(c: Context, w: Writer):
     sid = get_sid(c, w)
     cmd_task_done(sid, int(c.req.query.get("id", "0")))
 
+async def h_task_edit(c: Context, w: Writer):
+    tid = int(c.req.query.get("id", "0"))
+    t = get_task(tid)
+    if t:
+        w.patch(safe(task_row_editing(t)), selector=f"#task-row-{tid}")
+        w.script("setTimeout(() => { let el = document.querySelector('#task-row-" + str(tid) + " [contenteditable]'); if(el){el.focus(); let r=document.createRange(); r.selectNodeContents(el); let s=window.getSelection(); s.removeAllRanges(); s.addRange(r)} }, 50)")
+
 async def h_task_rename(c: Context, w: Writer):
     sid = get_sid(c, w)
     tid = int(c.req.query.get("id", "0"))
     name = c.req.query.get("name", "").strip()
     if name: cmd_task_rename(sid, tid, name)
+    relay.publish(f"tasks.{sid}.update", None)
 
 async def h_health(c: Context, w: Writer): w.text("ok")
 
@@ -516,5 +538,6 @@ async def bootstrap(app: Stario, span: Span):
     app.post("/tasks/track", h_task_track)
     app.post("/tasks/stop", h_task_stop)
     app.post("/tasks/done", h_task_done)
+    app.post("/tasks/edit", h_task_edit)
     app.post("/tasks/rename", h_task_rename)
     app.get("/health", h_health)
