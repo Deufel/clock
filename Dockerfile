@@ -10,4 +10,6 @@ RUN uv sync --no-dev --frozen
 
 COPY . .
 
+VOLUME /app/data
+
 CMD ["uv", "run", "stario", "serve", "main:bootstrap", "--host", "0.0.0.0"]

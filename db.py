@@ -1,6 +1,6 @@
 import apsw, json, secrets, time
 
-db = apsw.Connection(":memory:")
+db = apsw.Connection("/app/data/clock.db")
 db.execute("PRAGMA journal_mode=WAL")
 db.execute("PRAGMA synchronous=NORMAL")
 db.execute("PRAGMA busy_timeout=5000")
@@ -48,12 +48,12 @@ def get_task(tid):
     return dict(id=r[0], name=r[1], elapsed=r[2], track_start=r[3], done=r[4], created=r[5], sid=r[6]) if r else None
 
 def task_start_tracking(tid):
-    db.execute("UPDATE tasks SET track_start=? WHERE id=? AND track_start IS NULL AND done=0", (time.monotonic(), tid))
+    db.execute("UPDATE tasks SET track_start=? WHERE id=? AND track_start IS NULL AND done=0", (time.time(), tid))
 
 def task_stop_tracking(tid):
     t = get_task(tid)
     if not t or t["track_start"] is None: return
-    extra = time.monotonic() - t["track_start"]
+    extra = time.time() - t["track_start"]
     db.execute("UPDATE tasks SET elapsed=elapsed+?, track_start=NULL WHERE id=?", (extra, tid))
 
 def task_complete(tid):
@@ -62,7 +62,7 @@ def task_complete(tid):
 
 def task_elapsed(t):
     e = t["elapsed"]
-    if t["track_start"] is not None: e += time.monotonic() - t["track_start"]
+    if t["track_start"] is not None: e += time.time() - t["track_start"]
     return e
 
 def rename_task(tid, name): db.execute("UPDATE tasks SET name=? WHERE id=?", (name, tid))
