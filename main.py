@@ -12,10 +12,12 @@ setup_tags()
 from db import (new_session, valid_session, get_json, set_json,
                 add_task, get_tasks, get_task, task_start_tracking,
                 task_stop_tracking, task_complete, task_elapsed, stop_all_tracking,
-                rename_task, get_session_user, find_or_create_user_and_link)
+                rename_task, get_session_user, find_or_create_user_and_link,
+                admin_stats)
 
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "")
 
 TZ = ZoneInfo("America/Chicago")
 relay = Relay()
@@ -26,7 +28,7 @@ def get_sid(c, w):
     sid = c.req.cookies.get("sid", "")
     if valid_session(sid): return sid
     sid = new_session()
-    w.cookie("sid", sid, httponly=True, samesite="Lax", path="/")
+    w.cookie("sid", sid, httponly=True, secure=True, samesite="Lax", path="/")
     return sid
 
 RATE_OPTIONS = [("live", 0.016), ("1s", 1.0), ("1m", 60.0), ("off", 0)]
@@ -456,11 +458,11 @@ async def h_oauth_callback(c: Context, w: Writer):
     sid = get_sid(c, w)
     user, sid = find_or_create_user_and_link(sid, email, name, google_id)
     # Update cookie if sid changed
-    w.cookie("sid", sid, httponly=True, samesite="Lax", path="/")
+    w.cookie("sid", sid, httponly=True, secure=True, samesite="Lax", path="/")
     w.redirect("/tasks")
 
 async def h_logout(c: Context, w: Writer):
-    w.cookie("sid", "", httponly=True, samesite="Lax", path="/", max_age=0)
+    w.cookie("sid", "", httponly=True, secure=True, samesite="Lax", path="/", max_age=0)
     w.redirect("/")
 
 async def h_show_clock(c: Context, w: Writer):
@@ -513,6 +515,64 @@ async def h_task_rename(c: Context, w: Writer):
     if name: cmd_task_rename(sid, tid, name)
     relay.publish(f"tasks.{sid}.update", None)
 
+def is_admin(c, w):
+    "Check if current user is the admin. Returns True/False."
+    sid = c.req.cookies.get("sid", "")
+    if not valid_session(sid): return False
+    user = get_session_user(sid)
+    if not user: return False
+    return user["email"] == ADMIN_EMAIL
+
+def fmt_duration(secs):
+    "Format seconds into a human-readable string"
+    if secs < 60: return f"{secs:.0f}s"
+    if secs < 3600:
+        m, s = divmod(int(secs), 60)
+        return f"{m}m {s}s"
+    h, rem = divmod(int(secs), 3600)
+    m = rem // 60
+    return f"{h}h {m}m"
+
+def admin_page(stats):
+    rows = [
+        ("Users", stats["users"]),
+        ("Sessions (total)", stats["sessions"]),
+        ("Sessions (authenticated)", stats["sessions_authed"]),
+        ("Sessions (anonymous)", stats["sessions_anon"]),
+        ("Tasks (total)", stats["tasks_total"]),
+        ("Tasks (active)", stats["tasks_active"]),
+        ("Tasks (completed)", stats["tasks_done"]),
+        ("Tasks (tracking now)", stats["tasks_tracking"]),
+        ("Total time tracked", fmt_duration(stats["total_elapsed"])),
+    ]
+    return Html({"lang": "en"},
+        Head(
+            Meta({"charset": "UTF-8"}),
+            Meta({"name": "viewport", "content": "width=device-width, initial-scale=1.0"}),
+            Title("Admin — Timer"),
+            Style(CSS + """
+.admin { max-width: 500px; margin: 2rem auto; padding: 1rem; }
+.admin h1 { font-size: 1.25rem; margin-bottom: 1rem; }
+.stat-table { width: 100%; border-collapse: collapse; }
+.stat-table td { padding: 0.5rem 0; border-bottom: 1px solid #222; }
+.stat-table td:last-child { text-align: right; font-family: 'JetBrains Mono', monospace; font-size: 0.9rem; }
+@media (prefers-color-scheme: light) { .stat-table td { border-color: #ddd; } }
+""")),
+        Body(
+            Div({"class": "admin"},
+                H1("Admin"),
+                Table({"class": "stat-table"},
+                    *[Tr(Td(label), Td(str(value))) for label, value in rows]),
+                P({"style": "margin-top:1.5rem; text-align:center"},
+                    A({"href": "/tasks"}, "← Back to tasks")))))
+
+async def h_admin(c: Context, w: Writer):
+    if not is_admin(c, w):
+        w.redirect("/")
+        return
+    stats = admin_stats()
+    w.html(safe(admin_page(stats)))
+
 async def h_health(c: Context, w: Writer): w.text("ok")
 
 async def bootstrap(app: Stario, span: Span):
@@ -530,4 +590,5 @@ async def bootstrap(app: Stario, span: Span):
     app.post("/tasks/done", h_task_done)
     app.post("/tasks/edit", h_task_edit)
     app.post("/tasks/rename", h_task_rename)
+    app.get("/admin", h_admin)
     app.get("/health", h_health)

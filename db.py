@@ -141,3 +141,23 @@ def find_or_create_user_and_link(sid, email, name, google_id):
     # No existing session, or same session — just link
     link_session_to_user(sid, user["id"])
     return user, sid
+
+# --- Admin stats ---
+
+def admin_stats():
+    "Aggregate stats for the admin console"
+    s = {}
+    s["users"] = db.execute("SELECT count(*) FROM users").fetchone()[0]
+    s["sessions"] = db.execute("SELECT count(*) FROM sessions").fetchone()[0]
+    s["sessions_authed"] = db.execute("SELECT count(*) FROM sessions WHERE user_id IS NOT NULL").fetchone()[0]
+    s["sessions_anon"] = s["sessions"] - s["sessions_authed"]
+    s["tasks_total"] = db.execute("SELECT count(*) FROM tasks").fetchone()[0]
+    s["tasks_active"] = db.execute("SELECT count(*) FROM tasks WHERE done=0").fetchone()[0]
+    s["tasks_done"] = db.execute("SELECT count(*) FROM tasks WHERE done=1").fetchone()[0]
+    s["tasks_tracking"] = db.execute("SELECT count(*) FROM tasks WHERE track_start IS NOT NULL").fetchone()[0]
+    row = db.execute("SELECT coalesce(sum(elapsed), 0) FROM tasks").fetchone()
+    s["total_elapsed"] = row[0]
+    # Currently tracking — add live elapsed
+    for r in db.execute("SELECT track_start FROM tasks WHERE track_start IS NOT NULL"):
+        s["total_elapsed"] += time.time() - r[0]
+    return s
