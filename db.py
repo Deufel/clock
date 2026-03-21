@@ -7,7 +7,16 @@ db.execute("PRAGMA busy_timeout=5000")
 db.execute("PRAGMA cache_size=-64000")
 db.execute("PRAGMA foreign_keys=ON")
 
-db.execute("CREATE TABLE IF NOT EXISTS sessions(sid TEXT PRIMARY KEY, created REAL NOT NULL)")
+db.execute("""CREATE TABLE IF NOT EXISTS users(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT UNIQUE NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    google_id TEXT UNIQUE,
+    created_at REAL NOT NULL)""")
+db.execute("CREATE TABLE IF NOT EXISTS sessions(sid TEXT PRIMARY KEY, user_id INTEGER, created REAL NOT NULL, FOREIGN KEY(user_id) REFERENCES users(id))")
+# Migration: add user_id column if missing (existing DBs)
+try: db.execute("ALTER TABLE sessions ADD COLUMN user_id INTEGER REFERENCES users(id)")
+except: pass
 db.execute("CREATE TABLE IF NOT EXISTS state(sid TEXT NOT NULL, key TEXT NOT NULL, val TEXT NOT NULL DEFAULT '{}', PRIMARY KEY(sid, key), FOREIGN KEY(sid) REFERENCES sessions(sid) ON DELETE CASCADE)")
 db.execute("""CREATE TABLE IF NOT EXISTS tasks(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -70,3 +79,65 @@ def rename_task(tid, name): db.execute("UPDATE tasks SET name=? WHERE id=?", (na
 def stop_all_tracking(sid):
     for t in get_tasks(sid):
         if t["track_start"] is not None: task_stop_tracking(t["id"])
+
+# --- Auth ---
+
+def find_user_by_google_id(google_id):
+    r = db.execute("SELECT id, email, name, google_id, created_at FROM users WHERE google_id=?", (google_id,)).fetchone()
+    return dict(id=r[0], email=r[1], name=r[2], google_id=r[3], created_at=r[4]) if r else None
+
+def find_user_by_email(email):
+    r = db.execute("SELECT id, email, name, google_id, created_at FROM users WHERE email=?", (email,)).fetchone()
+    return dict(id=r[0], email=r[1], name=r[2], google_id=r[3], created_at=r[4]) if r else None
+
+def create_user(email, name, google_id):
+    db.execute("INSERT INTO users(email, name, google_id, created_at) VALUES(?, ?, ?, ?)",
+               (email, name, google_id, time.time()))
+    return db.last_insert_rowid()
+
+def link_session_to_user(sid, user_id):
+    db.execute("UPDATE sessions SET user_id=? WHERE sid=?", (user_id, sid))
+
+def get_session_user(sid):
+    r = db.execute("SELECT user_id FROM sessions WHERE sid=?", (sid,)).fetchone()
+    if not r or r[0] is None: return None
+    return find_user_by_id(r[0])
+
+def find_user_by_id(user_id):
+    r = db.execute("SELECT id, email, name, google_id, created_at FROM users WHERE id=?", (user_id,)).fetchone()
+    return dict(id=r[0], email=r[1], name=r[2], google_id=r[3], created_at=r[4]) if r else None
+
+def get_user_session(user_id):
+    "Find the most recent session for a user"
+    r = db.execute("SELECT sid FROM sessions WHERE user_id=? ORDER BY created DESC LIMIT 1", (user_id,)).fetchone()
+    return r[0] if r else None
+
+def migrate_tasks_to_session(from_sid, to_sid):
+    "Move all tasks from one session to another"
+    db.execute("UPDATE tasks SET sid=? WHERE sid=?", (to_sid, from_sid))
+    db.execute("UPDATE state SET sid=? WHERE sid=?", (to_sid, from_sid))
+
+def find_or_create_user_and_link(sid, email, name, google_id):
+    """Find or create a Google user, link to session, migrate tasks if needed.
+    Returns (user, sid) — sid may change if user already had a session."""
+    user = find_user_by_google_id(google_id)
+    if not user:
+        user = find_user_by_email(email)
+        if user:
+            db.execute("UPDATE users SET google_id=? WHERE id=?", (google_id, user["id"]))
+            user["google_id"] = google_id
+    if not user:
+        uid = create_user(email, name, google_id)
+        user = find_user_by_id(uid)
+        link_session_to_user(sid, user["id"])
+        return user, sid
+    # User exists — check if they already have a session
+    existing_sid = get_user_session(user["id"])
+    if existing_sid and existing_sid != sid:
+        # Migrate anonymous tasks into existing session
+        migrate_tasks_to_session(sid, existing_sid)
+        del_session(sid)
+        return user, existing_sid
+    # No existing session, or same session — just link
+    link_session_to_user(sid, user["id"])
+    return user, sid

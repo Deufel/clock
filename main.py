@@ -1,5 +1,6 @@
-import asyncio, math
+import asyncio, math, os, httpx
 from datetime import datetime
+from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 from stario import Stario, Context, Writer, data
 from stario.relay import Relay
@@ -11,7 +12,10 @@ setup_tags()
 from db import (new_session, valid_session, get_json, set_json,
                 add_task, get_tasks, get_task, task_start_tracking,
                 task_stop_tracking, task_complete, task_elapsed, stop_all_tracking,
-                rename_task)
+                rename_task, get_session_user, find_or_create_user_and_link)
+
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
 
 TZ = ZoneInfo("America/Chicago")
 relay = Relay()
@@ -256,7 +260,7 @@ async def _tasks_loop(w, sid):
 TASK_CSS = """
 .task-btn { padding: 0.4rem 0.8rem; font-size: 0.8rem; min-width: 3.5rem; }
 .task-btn.on { background: #e54; border-color: #e54; color: #fff; }
-.task-input { padding: 0.6rem; border-radius: 0.5rem; border: 1px solid #333; background: #151515; color: #fff; font: inherit; flex: 1; font-size: 0.95rem; }
+.task-input { padding: 0.6rem; border-radius: 0.5rem; border: 1px solid #333; background: #151515; color: #fff; font: inherit; flex: 1; font-size: 16px; }
 @media (prefers-color-scheme: light) { .task-input { background: #fff; color: #222; border-color: #ddd; } }
 .task-input:empty::before { content: "new task..."; color: #666; }
 .task-input:focus { outline: 2px solid #e54; outline-offset: 2px; }
@@ -348,7 +352,7 @@ def tasks_view(sid):
             Span({"class": "task-input", "contenteditable": "true", "data-ignore-morph": True,
                   "role": "textbox", "aria-label": "New task name",
                   "data-on:keydown": "if(event.key==='Enter'){event.preventDefault(); let n=el.innerText.trim(); if(n){@post('/tasks/add?name='+encodeURIComponent(n))} el.innerText=''}"}),
-            Button({"data-on:click": "let el=evt.target.closest('.controls').querySelector('[contenteditable]'); let n=el.innerText.trim(); if(n){@post('/tasks/add?name='+encodeURIComponent(n))} el.innerText=''"}, "Add")),
+            Button({"data-on:click": "var inp=el.closest('.controls').querySelector('[contenteditable]'); var n=inp.innerText.trim(); if(n){@post('/tasks/add?name='+encodeURIComponent(n))} inp.innerText=''"}, "Add")),
         Div({"id": "task-list", "style": "width:100%",
              "data-on:click": "const btn = evt.target.closest('[data-url]'); if (btn) @post(btn.dataset.url)"}),
         Div({"id": "rate-toggle"}, rate_toggle(get_tasks_rate(sid))),
@@ -358,7 +362,95 @@ async def h_tasks(c: Context, w: Writer):
     sid = get_sid(c, w)
     w.html(safe(tasks_view(sid)))
 
-async def h_home(c: Context, w: Writer): w.redirect("/tasks")
+LANDING_CSS = """
+.landing { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2rem; min-height: 100svh; padding: 2rem; }
+.landing-logo { display: flex; align-items: center; gap: 0.75rem; font-size: 2rem; font-weight: 700; }
+.landing-logo svg { opacity: 0.8; }
+.landing-subtitle { color: #888; font-size: 1rem; margin-top: -1rem; }
+.landing-actions { display: flex; flex-direction: column; gap: 1rem; align-items: center; }
+.btn-google { display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem 1.5rem; border-radius: 0.5rem; border: 1px solid #333; background: #151515; color: #eee; font: inherit; cursor: pointer; font-size: 1rem; transition: all 0.15s; text-decoration: none; }
+.btn-google:hover { background: #222; border-color: #555; }
+@media (prefers-color-scheme: light) { .btn-google { background: #fff; color: #222; border-color: #ddd; } .btn-google:hover { background: #eee; } }
+.btn-public { color: #666; font-size: 0.85rem; text-decoration: underline; cursor: pointer; background: none; border: none; font: inherit; }
+.btn-public:hover { color: #eee; }
+@media (prefers-color-scheme: light) { .btn-public:hover { color: #222; } }
+"""
+
+GOOGLE_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>'
+
+def landing_page():
+    return Html({"lang": "en"},
+        Head(
+            Meta({"charset": "UTF-8"}),
+            Meta({"name": "viewport", "content": "width=device-width, initial-scale=1.0"}),
+            Title("Timer"),
+            Style(CSS + LANDING_CSS)),
+        Body(
+            Div({"class": "landing"},
+                Span({"class": "landing-logo"}, SafeString(LOGO_SVG), "Timer"),
+                P({"class": "landing-subtitle"}, "Track your time, simply."),
+                Div({"class": "landing-actions"},
+                    A({"href": "/oauth/google", "class": "btn-google"}, SafeString(GOOGLE_ICON), "Sign in with Google"),
+                    A({"href": "/tasks", "class": "btn-public"}, "Use without an account")))))
+
+async def h_home(c: Context, w: Writer):
+    sid = c.req.cookies.get("sid", "")
+    if valid_session(sid) and get_session_user(sid):
+        w.redirect("/tasks")
+    else:
+        w.html(safe(landing_page()))
+
+async def h_oauth_google(c: Context, w: Writer):
+    redirect_uri = f"https://{c.req.headers.get('host', 'localhost')}/oauth/callback"
+    params = {
+        "client_id": GOOGLE_CLIENT_ID,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": "email profile",
+        "access_type": "offline",
+        "prompt": "consent",
+    }
+    w.redirect(f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}")
+
+async def h_oauth_callback(c: Context, w: Writer):
+    code = c.req.query.get("code")
+    if not code:
+        w.redirect("/?error=oauth_failed")
+        return
+    redirect_uri = f"https://{c.req.headers.get('host', 'localhost')}/oauth/callback"
+    # Exchange code for tokens
+    token_resp = httpx.post("https://oauth2.googleapis.com/token", data={
+        "client_id": GOOGLE_CLIENT_ID,
+        "client_secret": GOOGLE_CLIENT_SECRET,
+        "code": code,
+        "redirect_uri": redirect_uri,
+        "grant_type": "authorization_code",
+    }, timeout=10.0)
+    if token_resp.status_code != 200:
+        w.redirect("/?error=token_failed")
+        return
+    token_data = token_resp.json()
+    # Get user info
+    user_resp = httpx.get("https://www.googleapis.com/oauth2/v3/userinfo",
+        headers={"Authorization": f"Bearer {token_data['access_token']}"},
+        timeout=10.0)
+    if user_resp.status_code != 200:
+        w.redirect("/?error=userinfo_failed")
+        return
+    info = user_resp.json()
+    email = info["email"].lower()
+    name = info.get("name", email.split("@")[0])
+    google_id = info["sub"]
+    # Get or create session
+    sid = get_sid(c, w)
+    user, sid = find_or_create_user_and_link(sid, email, name, google_id)
+    # Update cookie if sid changed
+    w.cookie("sid", sid, httponly=True, samesite="Lax", path="/")
+    w.redirect("/tasks")
+
+async def h_logout(c: Context, w: Writer):
+    w.cookie("sid", "", httponly=True, samesite="Lax", path="/", max_age=0)
+    w.redirect("/")
 
 async def h_show_clock(c: Context, w: Writer):
     sid = get_sid(c, w)
@@ -405,6 +497,9 @@ async def h_health(c: Context, w: Writer): w.text("ok")
 
 async def bootstrap(app: Stario, span: Span):
     app.get("/", h_home)
+    app.get("/oauth/google", h_oauth_google)
+    app.get("/oauth/callback", h_oauth_callback)
+    app.get("/logout", h_logout)
     app.get("/tasks", h_tasks)
     app.get("/tasks/stream", h_tasks_stream)
     app.post("/tasks/rate", h_tasks_rate)
