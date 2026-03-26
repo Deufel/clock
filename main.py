@@ -7,14 +7,14 @@ embedded Granian server, and simplified routing.
 Run with: python main.py
 """
 
-import asyncio, os, httpx
+import asyncio, json, os, httpx
 from datetime import datetime
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 from html_tags import setup_tags, to_html
 from py_sse import (
     create_app, create_relay, create_signer, set_cookie,
-    patch_elements, static, serve,
+    patch_elements, execute_script, static, serve,
 )
 from db import (
     new_session, valid_session, get_json, set_json,
@@ -186,6 +186,17 @@ def task_bar(tasks):
 def task_panel(tasks):
     return Div(Div({"id": "task-bar"}, task_bar(tasks)), task_list(tasks))
 
+def render_live(sid):
+    """Single fat-morph target: all dynamic content in one ID'd container."""
+    tasks = get_tasks(sid)
+    meta_text, _ = make_meta(sid, tasks)
+    return Div({"id": "live"},
+        P({"class": "meta", "id": "meta"}, meta_text),
+        Div({"id": "task-list", "style": "width:100%",
+             "data-on:click": "const btn = evt.target.closest('[data-url]'); if (btn) @post(btn.dataset.url)"},
+            task_panel(tasks)),
+        Div({"id": "rate-toggle"}, rate_toggle(get_tasks_rate(sid))))
+
 # ---------------------------------------------------------------------------
 # Task commands (mutate state + publish)
 # ---------------------------------------------------------------------------
@@ -346,7 +357,6 @@ def shell(*content_children, title="Tasks", stream_url="/tasks/stream", user=Non
                     Div({"class": "header-actions"},
                         A({"href": "/logout", "class": "auth-link"}, "Sign out") if user else A({"href": "/oauth/google", "class": "auth-link"}, "Sign in"),
                         A({"href": "https://github.com/Deufel/clock", "target": "_blank", "class": "gh-link", "aria-label": "Source code"}, Safe(GH_SVG)))),
-                P({"class": "meta", "id": "meta"}),
                 Div({"class": "content"}, *content_children))))
 
 def tasks_view(sid, user=None):
@@ -356,9 +366,7 @@ def tasks_view(sid, user=None):
                   "role": "textbox", "aria-label": "New task name",
                   "data-on:keydown": "if(event.key==='Enter'){event.preventDefault(); let n=el.innerText.trim(); if(n){@post('/tasks/add?name='+encodeURIComponent(n))} el.innerText=''}"}),
             Button({"data-on:click": "var inp=el.closest('.controls').querySelector('[contenteditable]'); var n=inp.innerText.trim(); if(n){@post('/tasks/add?name='+encodeURIComponent(n))} inp.innerText=''"}, "Add")),
-        Div({"id": "task-list", "style": "width:100%",
-             "data-on:click": "const btn = evt.target.closest('[data-url]'); if (btn) @post(btn.dataset.url)"}),
-        Div({"id": "rate-toggle"}, rate_toggle(get_tasks_rate(sid))),
+        render_live(sid),
         user=user)
 
 def landing_page():
@@ -417,15 +425,12 @@ def admin_page(stats):
 # SSE update helper
 # ---------------------------------------------------------------------------
 
-
-
-def _yield_update(sid, tasks=None):
-    if tasks is None: tasks = get_tasks(sid)
-    meta_text, title_text = make_meta(sid, tasks)
+def _yield_update(sid):
+    """One fat morph + title update via script. The Tao of Datastar."""
+    _, title_text = make_meta(sid)
     return [
-        patch_elements(task_panel(tasks), mode="inner", selector="#task-list"),
-        patch_elements(to_html(P({"class": "meta", "id": "meta"}, meta_text)), selector="#meta"),
-        patch_elements(to_html(Title(title_text)), selector="title"),
+        patch_elements(render_live(sid)),
+        execute_script(f"document.title = {json.dumps(title_text)}"),
     ]
 
 # ---------------------------------------------------------------------------
@@ -464,7 +469,7 @@ async def tasks_rate(req):
     set_json(sid, "tasks_rate", rate)
     relay.publish(f"tasks.{sid}.rate", None)
     relay.publish(f"tasks.{sid}.update", None)
-    yield patch_elements(to_html(rate_toggle(rate)), mode="inner", selector="#rate-toggle")
+    return None
 
 
 @app.post("/tasks/add")
