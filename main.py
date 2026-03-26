@@ -417,13 +417,15 @@ def admin_page(stats):
 # SSE update helper
 # ---------------------------------------------------------------------------
 
+
+
 def _yield_update(sid, tasks=None):
     if tasks is None: tasks = get_tasks(sid)
     meta_text, title_text = make_meta(sid, tasks)
     return [
         patch_elements(task_panel(tasks), mode="inner", selector="#task-list"),
-        patch_elements(to_html(P({"class": "meta", "id": "meta"}, meta_text))),
-        patch_elements(to_html(Title(title_text))),
+        patch_elements(to_html(P({"class": "meta", "id": "meta"}, meta_text)), selector="#meta"),
+        patch_elements(to_html(Title(title_text)), selector="title"),
     ]
 
 # ---------------------------------------------------------------------------
