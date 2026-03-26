@@ -10,4 +10,4 @@ if [ ! -f /app/data/clock.db ]; then
 fi
 
 # Run the app under Litestream (it replicates WAL changes continuously)
-exec litestream replicate -exec "uv run stario serve main:bootstrap --host 0.0.0.0" -config /app/litestream.yml
+exec litestream replicate -exec "uv run python main.py" -config /app/litestream.yml

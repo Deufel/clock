@@ -1,6 +1,8 @@
-import apsw, json, secrets, time
+import apsw, json, secrets, time, os
 
-db = apsw.Connection("/app/data/clock.db")
+DB_PATH = os.environ.get("DB_PATH", "data/clock.db")
+os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
+db = apsw.Connection(DB_PATH)
 db.execute("PRAGMA journal_mode=WAL")
 db.execute("PRAGMA synchronous=NORMAL")
 db.execute("PRAGMA busy_timeout=5000")
@@ -14,7 +16,6 @@ db.execute("""CREATE TABLE IF NOT EXISTS users(
     google_id TEXT UNIQUE,
     created_at REAL NOT NULL)""")
 db.execute("CREATE TABLE IF NOT EXISTS sessions(sid TEXT PRIMARY KEY, user_id INTEGER, created REAL NOT NULL, FOREIGN KEY(user_id) REFERENCES users(id))")
-# Migration: add user_id column if missing (existing DBs)
 try: db.execute("ALTER TABLE sessions ADD COLUMN user_id INTEGER REFERENCES users(id)")
 except: pass
 db.execute("CREATE TABLE IF NOT EXISTS state(sid TEXT NOT NULL, key TEXT NOT NULL, val TEXT NOT NULL DEFAULT '{}', PRIMARY KEY(sid, key), FOREIGN KEY(sid) REFERENCES sessions(sid) ON DELETE CASCADE)")
@@ -52,7 +53,7 @@ def get_tasks(sid, include_done=False):
     if not include_done: q += " AND done=0"
     return [dict(id=r[0], name=r[1], elapsed=r[2], track_start=r[3], done=r[4], created=r[5]) for r in db.execute(q + " ORDER BY created", (sid,))]
 
-def get_task(tid): 
+def get_task(tid):
     r = db.execute("SELECT id, name, elapsed, track_start, done, created, sid FROM tasks WHERE id=?", (tid,)).fetchone()
     return dict(id=r[0], name=r[1], elapsed=r[2], track_start=r[3], done=r[4], created=r[5], sid=r[6]) if r else None
 
@@ -108,18 +109,15 @@ def find_user_by_id(user_id):
     return dict(id=r[0], email=r[1], name=r[2], google_id=r[3], created_at=r[4]) if r else None
 
 def get_user_session(user_id):
-    "Find the most recent session for a user"
     r = db.execute("SELECT sid FROM sessions WHERE user_id=? ORDER BY created DESC LIMIT 1", (user_id,)).fetchone()
     return r[0] if r else None
 
 def migrate_tasks_to_session(from_sid, to_sid):
-    "Move all tasks from one session to another"
     db.execute("UPDATE tasks SET sid=? WHERE sid=?", (to_sid, from_sid))
-    db.execute("UPDATE state SET sid=? WHERE sid=?", (to_sid, from_sid))
+    db.execute("INSERT OR IGNORE INTO state(sid, key, val) SELECT ?, key, val FROM state WHERE sid=?", (to_sid, from_sid))
+    db.execute("DELETE FROM state WHERE sid=?", (from_sid,))
 
 def find_or_create_user_and_link(sid, email, name, google_id):
-    """Find or create a Google user, link to session, migrate tasks if needed.
-    Returns (user, sid) — sid may change if user already had a session."""
     user = find_user_by_google_id(google_id)
     if not user:
         user = find_user_by_email(email)
@@ -131,21 +129,17 @@ def find_or_create_user_and_link(sid, email, name, google_id):
         user = find_user_by_id(uid)
         link_session_to_user(sid, user["id"])
         return user, sid
-    # User exists — check if they already have a session
     existing_sid = get_user_session(user["id"])
     if existing_sid and existing_sid != sid:
-        # Migrate anonymous tasks into existing session
         migrate_tasks_to_session(sid, existing_sid)
         del_session(sid)
         return user, existing_sid
-    # No existing session, or same session — just link
     link_session_to_user(sid, user["id"])
     return user, sid
 
 # --- Admin stats ---
 
 def admin_stats():
-    "Aggregate stats for the admin console"
     s = {}
     s["users"] = db.execute("SELECT count(*) FROM users").fetchone()[0]
     s["sessions"] = db.execute("SELECT count(*) FROM sessions").fetchone()[0]
@@ -157,7 +151,6 @@ def admin_stats():
     s["tasks_tracking"] = db.execute("SELECT count(*) FROM tasks WHERE track_start IS NOT NULL").fetchone()[0]
     row = db.execute("SELECT coalesce(sum(elapsed), 0) FROM tasks").fetchone()
     s["total_elapsed"] = row[0]
-    # Currently tracking — add live elapsed
     for r in db.execute("SELECT track_start FROM tasks WHERE track_start IS NOT NULL"):
         s["total_elapsed"] += time.time() - r[0]
     return s

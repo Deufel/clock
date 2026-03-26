@@ -1,54 +1,107 @@
-import asyncio, math, os, httpx
+"""
+Clock — task time-tracker with live updates, Google auth, and admin stats.
+
+Modernised to use py_sse RSGI features: signed cookies, beforeware,
+embedded Granian server, and simplified routing.
+
+Run with: python main.py
+"""
+
+import asyncio, os, httpx
 from datetime import datetime
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
-from stario import Stario, Context, Writer, data
-from stario.relay import Relay
-from html_tags import setup_tags
-from stario.html import SafeString
-SafeString.__str__ = lambda self: self.safe_str
-SafeString.__html__ = lambda self: self.safe_str
+from html_tags import setup_tags, to_html
+from py_sse import (
+    create_app, create_relay, create_signer, set_cookie,
+    patch_elements, static, serve,
+)
+from db import (
+    new_session, valid_session, get_json, set_json,
+    add_task, get_tasks, get_task, task_start_tracking,
+    task_stop_tracking, task_complete, task_elapsed, stop_all_tracking,
+    rename_task, get_session_user, find_or_create_user_and_link,
+    admin_stats,
+)
+
 setup_tags()
-from db import (new_session, valid_session, get_json, set_json,
-                add_task, get_tasks, get_task, task_start_tracking,
-                task_stop_tracking, task_complete, task_elapsed, stop_all_tracking,
-                rename_task, get_session_user, find_or_create_user_and_link,
-                admin_stats)
 
-GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
+app   = create_app()
+relay = create_relay()
+static(app, "/favicon.svg", "favicon.svg")
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+GOOGLE_CLIENT_ID     = os.environ.get("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
-ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "")
+ADMIN_EMAIL          = os.environ.get("ADMIN_EMAIL", "")
+COOKIE_SECRET        = os.environ.get("COOKIE_SECRET", "change-me-in-production")
 
-TZ = ZoneInfo("America/Chicago")
-relay = Relay()
-MONO = "'JetBrains Mono', 'SF Mono', monospace"
-FAV_FONT = "'Berkeley Mono', monospace"
+TZ     = ZoneInfo("America/Chicago")
+signer = create_signer(COOKIE_SECRET)
 
-def get_sid(c, w):
-    sid = c.req.cookies.get("sid", "")
-    if valid_session(sid): return sid
+# ---------------------------------------------------------------------------
+# Raw-HTML helper (replaces stario SafeString)
+# ---------------------------------------------------------------------------
+
+class Safe:
+    """Wraps a string so html_tags.to_html() emits it unescaped."""
+    __slots__ = ("_s",)
+    def __init__(self, s): self._s = str(s)
+    def __str__(self):  return self._s
+    def __html__(self): return self._s
+
+# ---------------------------------------------------------------------------
+# Session helpers
+# ---------------------------------------------------------------------------
+
+def _read_sid(req) -> str | None:
+    """Unsign the session cookie, return sid or None."""
+    raw = req["cookies"].get("sid", "")
+    return signer.unsign(raw, max_age=None)
+
+def _write_sid(req, sid: str):
+    """Sign and set the session cookie."""
+    set_cookie(req, "sid", signer.sign(sid),
+               httponly=True, secure=True, samesite="Lax", path="/")
+
+def _ensure_sid(req) -> str:
+    """Return an existing valid sid or create a new one."""
+    sid = _read_sid(req)
+    if sid and valid_session(sid):
+        return sid
     sid = new_session()
-    w.cookie("sid", sid, httponly=True, secure=True, samesite="Lax", path="/")
+    _write_sid(req, sid)
     return sid
 
+# ---------------------------------------------------------------------------
+# Beforeware — inject sid + user into every request
+# ---------------------------------------------------------------------------
+
+@app.before
+async def inject_session(req):
+    # Skip session injection for health check
+    if req["path"] == "/health":
+        return
+    req["sid"]  = _ensure_sid(req)
+    req["user"] = get_session_user(req["sid"])
+
+# ---------------------------------------------------------------------------
+# Preferences
+# ---------------------------------------------------------------------------
+
 RATE_OPTIONS = [("live", 0.016), ("1s", 1.0), ("1m", 60.0), ("off", 0)]
-RATE_MAP = {k: v for k, v in RATE_OPTIONS}
+RATE_MAP     = {k: v for k, v in RATE_OPTIONS}
 
 def get_tasks_rate(sid): return get_json(sid, "tasks_rate", lambda: 1.0)
-def get_show_clock(sid): return get_json(sid, "show_clock", lambda: False)
 
-def lerp(a, b, t): return a + (b - a) * t
+# ---------------------------------------------------------------------------
+# Formatting helpers
+# ---------------------------------------------------------------------------
+
 def to12(h): return (h % 12 or 12, "AM" if h < 12 else "PM")
-
-def time_bg(h, m):
-    t = h + m / 60.0
-    keys = [(0,8,0,0), (6,25,0.08,50), (12,30,0.08,85), (18,18,0.08,260), (24,8,0,0)]
-    for i in range(len(keys) - 1):
-        h0,l0,c0,hu0 = keys[i]; h1,l1,c1,hu1 = keys[i+1]
-        if t <= h1:
-            f = (t - h0) / (h1 - h0) if h1 != h0 else 0
-            return f"oklch({lerp(l0,l1,f):.1f}% {lerp(c0,c1,f):.3f} {lerp(hu0,hu1,f):.0f})"
-    return "oklch(8% 0 0)"
 
 def fmt_elapsed(secs):
     if secs >= 3600:
@@ -58,86 +111,46 @@ def fmt_elapsed(secs):
     ss = secs - mm * 60
     return f"{mm:02d}:{ss:05.2f}"
 
-def make_svg(hour, minute, second=0, tracking=False, frac=None, sz=16):
-    h = sz / 2
-    r, circ = sz * 0.4, 2 * math.pi * sz * 0.4
-    bg = "oklch(10% 0.03 160)" if tracking else time_bg(hour, minute)
-    h12 = hour if tracking else to12(hour)[0]
-    fs = sz * 0.69 if h12 < 10 else sz * 0.38 if h12 >= 100 else sz * 0.53
-    if frac is None: frac = second / 60.0 if tracking else minute / 60.0
-    filled = circ * frac
-    accent = "#2a2" if tracking else "#e54"
-    sw_w, rx = sz * 0.094, sz * 0.188
-    track = f"<circle cx='{h}' cy='{h}' r='{r:.1f}' fill='none' stroke='#fff' stroke-width='{sw_w:.1f}' stroke-opacity='0.08'/>"
-    ring = f"<circle cx='{h}' cy='{h}' r='{r:.1f}' fill='none' stroke='{accent}' stroke-width='{sw_w:.1f}' stroke-linecap='butt' stroke-dasharray='{filled:.2f} {circ:.2f}' transform='rotate(-90 {h} {h})'/>" if frac > 0 else ""
-    txt = f"<text x='{h}' y='{h}' text-anchor='middle' dominant-baseline='central' font-size='{fs:.1f}' font-family=\"{FAV_FONT}\" font-weight='700' fill='#fff'>{h12}</text>"
-    sec_hand = ""
-    if not tracking:
-        sec_deg = (second / 60.0) * 360
-        sec_r = r * 0.85
-        sx = h + sec_r * math.sin(math.radians(sec_deg))
-        sy = h - sec_r * math.cos(math.radians(sec_deg))
-        sec_hand = (f"<line x1='{h}' y1='{h}' x2='{sx:.2f}' y2='{sy:.2f}' stroke='{accent}' stroke-width='0.15' opacity='0.6'/>"
-                    f"<circle cx='{sx:.2f}' cy='{sy:.2f}' r='0.25' fill='{accent}' opacity='0.8'/>")
-    style = ""
-    return f"<svg viewBox='0 0 {sz} {sz}' xmlns='http://www.w3.org/2000/svg'>{style}<defs><clipPath id='c'><rect width='{sz}' height='{sz}' rx='{rx:.1f}'/></clipPath></defs><g clip-path='url(#c)'><rect width='{sz}' height='{sz}' fill='{bg}'/></g>{track}{ring}{sec_hand}{txt}</svg>"
+def fmt_duration(secs):
+    if secs < 60: return f"{secs:.0f}s"
+    if secs < 3600:
+        m, s = divmod(int(secs), 60)
+        return f"{m}m {s}s"
+    h, rem = divmod(int(secs), 3600)
+    return f"{h}h {rem // 60}m"
 
-def make_tracking_svg(elapsed, sz=16):
-    h = sz / 2
-    r, circ = sz * 0.4, 2 * math.pi * sz * 0.4
-    bg = "oklch(10% 0.03 160)"
-    sw_w, rx = sz * 0.094, sz * 0.188
-    YEAR = 365.25 * 86400
-    total_yrs, total_days = elapsed / YEAR, elapsed / 86400
-    total_hrs, total_mins = elapsed / 3600, elapsed / 60
-    if total_yrs >= 1:
-        num, num_color, ring_color = f"{int(total_yrs):02d}", "#ed0", "#aa9"
-        frac = (elapsed % YEAR) / YEAR
-    elif total_days >= 1:
-        num, num_color, ring_color = f"{int(total_days):02d}", "#b4f", "#a9b"
-        frac = (elapsed % 86400) / 86400
-    elif total_hrs >= 1:
-        num, num_color, ring_color = f"{int(total_hrs):02d}", "#e54", "#a98"
-        frac = (elapsed % 3600) / 3600
-    elif total_mins >= 1:
-        num, num_color, ring_color = f"{int(total_mins):02d}", "#2a2", "#8a9"
-        frac = (elapsed % 60) / 60
-    else:
-        num, num_color, ring_color = f"{int(elapsed % 60):02d}", "#47f", "#89a"
-        frac = (elapsed * 100 % 100) / 100
-    fs = sz * 0.53
-    filled = circ * frac
-    track = f"<circle cx='{h}' cy='{h}' r='{r:.1f}' fill='none' stroke='#fff' stroke-width='{sw_w:.1f}' stroke-opacity='0.08'/>"
-    ring = f"<circle cx='{h}' cy='{h}' r='{r:.1f}' fill='none' stroke='{ring_color}' stroke-width='{sw_w:.1f}' stroke-linecap='butt' stroke-dasharray='{filled:.2f} {circ:.2f}' transform='rotate(-90 {h} {h})'/>" if frac > 0 else ""
-    txt = f"<text x='{h}' y='{h+sz*0.03}' text-anchor='middle' dominant-baseline='central' font-size='{fs:.1f}' font-family=\"'Berkeley Mono', monospace\" font-weight='700' fill='{num_color}'>{num}</text>"
-    return f"<svg viewBox='0 0 {sz} {sz}' xmlns='http://www.w3.org/2000/svg'><defs><clipPath id='c'><rect width='{sz}' height='{sz}' rx='{rx:.1f}'/></clipPath></defs><g clip-path='url(#c)'><rect width='{sz}' height='{sz}' fill='{bg}'/></g>{track}{ring}{txt}</svg>"
+# ---------------------------------------------------------------------------
+# Title / meta
+# ---------------------------------------------------------------------------
 
 def make_title(sid):
     now = datetime.now(TZ)
     h12, ampm = to12(now.hour)
     date = now.strftime('%b %-d, %Y')
-    time = f"{h12}:{now.minute:02d}{ampm.lower()}"
+    time_ = f"{h12}:{now.minute:02d}{ampm.lower()}"
     tasks = get_tasks(sid)
     active = [t for t in tasks if t["track_start"] is not None]
     if active:
-        return f"{date} | {time} | {active[0]['name']}"
-    return f"{date} | {time}"
+        return f"{date} | {time_} | {active[0]['name']}"
+    return f"{date} | {time_}"
 
-def tasks_sigs(sid):
-    tasks = get_tasks(sid)
+def make_meta(sid, tasks=None):
+    if tasks is None: tasks = get_tasks(sid)
     active = [t for t in tasks if t["track_start"] is not None]
     if active:
         t = active[0]
-        e = task_elapsed(t)
-        return dict(favSvg=make_tracking_svg(e), favMeta=f"tracking · {t['name']} · {fmt_elapsed(e)}", title=make_title(sid))
-    now = datetime.now(TZ)
-    h12, ampm = to12(now.hour)
-    return dict(favSvg=make_svg(now.hour, now.minute, now.second + now.microsecond / 1e6),
-                favMeta=f"{h12}:{now.minute:02d} {ampm} · {now.strftime('%b %-d')}",
-                title=make_title(sid))
+        meta_text = f"tracking · {t['name']} · {fmt_elapsed(task_elapsed(t))}"
+    else:
+        now = datetime.now(TZ)
+        h12, ampm = to12(now.hour)
+        meta_text = f"{h12}:{now.minute:02d} {ampm} · {now.strftime('%b %-d')}"
+    return meta_text, make_title(sid)
+
+# ---------------------------------------------------------------------------
+# Task rendering
+# ---------------------------------------------------------------------------
 
 def task_row(t):
-    "Render one task as a list item"
     tid = t["id"]
     elapsed = fmt_elapsed(task_elapsed(t))
     tracking = t["track_start"] is not None
@@ -154,12 +167,10 @@ def task_row(t):
         Button({"class": "task-btn", "data-url": f"/tasks/done?id={tid}"}, "✓"))
 
 def task_list(tasks):
-    "Render all tasks as an unordered list"
     if not tasks: return P({"class": "task-empty"}, "no tasks yet")
     return Ul({"class": "task-list"}, *[task_row(t) for t in tasks])
 
 def task_bar(tasks):
-    "Render a proportional time bar with legend"
     total = sum(task_elapsed(t) for t in tasks)
     if total == 0: return Span()
     colors = ["#e54", "#2a2", "#47f", "#f90", "#c4f", "#0cc", "#fa0", "#f47"]
@@ -172,27 +183,12 @@ def task_bar(tasks):
         legend.append(Span({"class": "bar-legend-item"}, Span({"style": f"color:{color}"}, "●"), f" {t['name']} ", Span({"class": "bar-pct"}, f"{round(pct)}%")))
     return Div({"class": "task-bar"}, Div({"class": "bar-track"}, *bars), Div({"class": "bar-legend"}, *legend))
 
-def clock_display(sid):
-    "Render the big clock SVG for the clock area"
-    tasks = get_tasks(sid)
-    active = [t for t in tasks if t["track_start"] is not None]
-    if active:
-        t = active[0]
-        e = task_elapsed(t)
-        svg = make_tracking_svg(e, sz=400)
-    else:
-        now = datetime.now(TZ)
-        svg = make_svg(now.hour, now.minute, now.second + now.microsecond / 1e6, sz=400)
-    return Div({"class": "clock-display"}, SafeString(svg))
+def task_panel(tasks):
+    return Div(Div({"id": "task-bar"}, task_bar(tasks)), task_list(tasks))
 
-def task_panel(tasks, sid=None):
-    "Full tasks content: bar above list, optional clock below"
-    parts = [Div({"id": "task-bar"}, task_bar(tasks)), task_list(tasks)]
-    if sid and get_show_clock(sid):
-        parts.append(Div({"id": "clock-area"}, clock_display(sid)))
-    else:
-        parts.append(Div({"id": "clock-area"}))
-    return Div(*parts)
+# ---------------------------------------------------------------------------
+# Task commands (mutate state + publish)
+# ---------------------------------------------------------------------------
 
 def cmd_task_add(sid, name):
     add_task(sid, name.strip())
@@ -215,13 +211,14 @@ def cmd_task_rename(sid, tid, name):
     rename_task(tid, name)
     relay.publish(f"tasks.{sid}.update", None)
 
-def safe(t): return SafeString(str(t))
+# ---------------------------------------------------------------------------
+# Rate toggle
+# ---------------------------------------------------------------------------
 
 def rate_label(key):
     return {"live": "Live", "1s": "1s", "1m": "1m", "off": "Off"}[key]
 
 def rate_toggle(current_rate):
-    "Render the update rate toggle bar"
     current_key = next((k for k, v in RATE_OPTIONS if v == current_rate), "1s")
     buttons = []
     for key, _ in RATE_OPTIONS:
@@ -230,6 +227,9 @@ def rate_toggle(current_rate):
             rate_label(key)))
     return Div({"class": "toggle-bar"}, *buttons)
 
+# ---------------------------------------------------------------------------
+# SSE ticker
+# ---------------------------------------------------------------------------
 
 async def _tasks_ticker(sid):
     sub = relay.subscribe(f"tasks.{sid}.rate")
@@ -237,31 +237,20 @@ async def _tasks_ticker(sid):
     while True:
         rate = get_tasks_rate(sid)
         if rate == 0:
-            # Off — just wait for a rate change event
             await rate_event
             rate_event = asyncio.ensure_future(sub.__anext__())
             continue
-        # Race: either the sleep completes or a rate change arrives
         sleep = asyncio.ensure_future(asyncio.sleep(rate))
         done, _ = await asyncio.wait({sleep, rate_event}, return_when=asyncio.FIRST_COMPLETED)
         if rate_event in done:
             sleep.cancel()
             rate_event = asyncio.ensure_future(sub.__anext__())
-            continue  # restart with new rate, don't tick
+            continue
         relay.publish(f"tasks.{sid}.tick", None)
 
-async def _tasks_loop(w, sid):
-    tasks = get_tasks(sid)
-    w.patch(safe(task_panel(tasks, sid)), mode="inner", selector="#task-list")
-    w.sync(tasks_sigs(sid))
-    tick = asyncio.create_task(_tasks_ticker(sid))
-    try:
-        async for _, _ in w.alive(relay.subscribe(f"tasks.{sid}.*")):
-            tasks = get_tasks(sid)
-            w.patch(safe(task_panel(tasks, sid)), mode="inner", selector="#task-list")
-            w.sync(tasks_sigs(sid))
-    finally:
-        tick.cancel()
+# ---------------------------------------------------------------------------
+# CSS
+# ---------------------------------------------------------------------------
 
 TASK_CSS = """
 .task-btn { padding: 0.4rem 0.8rem; font-size: 0.8rem; min-width: 3.5rem; }
@@ -293,6 +282,7 @@ TASK_CSS = """
 
 LOGO_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"><path d="M12 11.4V9.1"/><path d="m12 17 6.59-6.59"/><path d="m15.05 5.7-.218-.691a3 3 0 0 0-5.663 0L4.418 19.695A1 1 0 0 0 5.37 21h13.253a1 1 0 0 0 .951-1.31L18.45 16.2"/><circle cx="20" cy="9" r="2"/></svg>'
 GH_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"><path d="m16 18 6-6-6-6"/><path d="m8 6-6 6 6 6"/></svg>'
+GOOGLE_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>'
 
 CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap');
@@ -312,9 +302,6 @@ body { font-family: Inter, system-ui, sans-serif; background: #0a0a0a; color: #e
 .gh-link:hover { color: #eee; }
 @media (prefers-color-scheme: light) { .gh-link:hover { color: #222; } }
 .meta { text-align: center; color: #555; font-size: 0.8rem; font-family: 'JetBrains Mono', monospace; letter-spacing: 0.1em; text-transform: uppercase; min-height: 1.4em; }
-.settings { display: flex; gap: 1.5rem; align-items: center; font-size: 0.75rem; color: #666; flex-wrap: wrap; justify-content: center; }
-.setting { display: flex; align-items: center; gap: 0.4rem; cursor: pointer; }
-.setting input[type=checkbox] { accent-color: #e54; }
 .content { width: min(90vw, 500px); display: flex; flex-direction: column; align-items: center; gap: 1rem; }
 .controls { display: flex; gap: 0.75rem; align-items: center; justify-content: center; flex-wrap: wrap; }
 button { padding: 0.5rem 1.2rem; border-radius: 0.5rem; border: 1px solid #333; background: #151515; color: #eee; font: inherit; cursor: pointer; font-size: 0.85rem; transition: all 0.15s; }
@@ -322,58 +309,7 @@ button { padding: 0.5rem 1.2rem; border-radius: 0.5rem; border: 1px solid #333; 
 button:hover { background: #222; border-color: #555; }
 @media (prefers-color-scheme: light) { button:hover { background: #eee; } }
 button.on { background: #e54; border-color: #e54; color: #fff; }
-.clock-display { display: flex; justify-content: center; }
-.clock-display svg { width: min(400px, 80vw); height: auto; border-radius: 1.5rem; }
 """ + TASK_CSS
-
-EFFECTS = "if($_favEnabled) document.querySelector('#favicon').href = 'data:image/svg+xml,' + encodeURIComponent($favSvg); document.title = $title;"
-
-def shell(*content_children, title="Tasks", sigs=None, stream_url="/tasks/stream", show_clock=False, user=None):
-    if sigs is None: sigs = {}
-    sigs["_favEnabled"] = True
-    sigs["showClock"] = show_clock
-    return Html({"lang": "en"},
-        Head(
-            Meta({"charset": "UTF-8"}),
-            Meta({"name": "viewport", "content": "width=device-width, initial-scale=1.0"}),
-            Title(title),
-            Script({"type": "module", "src": "https://cdn.jsdelivr.net/gh/starfederation/datastar@1.0.0-RC.8/bundles/datastar.js"}),
-            Style(CSS),
-            Link({"rel": "icon", "type": "image/svg+xml", "id": "favicon"})),
-        Body(data.signals(sigs),
-            Div({"class": "page"},
-                Span({"style": "display:none"}, data.effect(EFFECTS),
-                    data.init(f"@get('{stream_url}', {{openWhenHidden: true}})")),
-                Div({"class": "app-header"},
-                    Span({"class": "app-logo"}, SafeString(LOGO_SVG), "Timer"),
-                    Div({"class": "header-actions"},
-                        A({"href": "/logout", "class": "auth-link"}, "Sign out") if user else A({"href": "/oauth/google", "class": "auth-link"}, "Sign in"),
-                        A({"href": "https://github.com/Deufel/clock", "target": "_blank", "class": "gh-link", "aria-label": "Source code"}, SafeString(GH_SVG)))),
-                P({"class": "meta"}, data.text("$favMeta")),
-                Div({"class": "content"}, *content_children),
-                Div({"class": "settings"},
-                    Label({"class": "setting"}, Input({"type": "checkbox", "data-bind": "_favEnabled"}), "Favicon"),
-                    Label({"class": "setting"}, Input({"type": "checkbox", "data-bind": "showClock",
-                        "data-on:change": "@post('/tasks/show-clock')"}), "Clock")))))
-
-def tasks_view(sid, user=None):
-    sigs = tasks_sigs(sid)
-    show_clock = get_show_clock(sid)
-    return shell(
-        Div({"class": "controls", "style": "width:100%"},
-            Span({"class": "task-input", "contenteditable": "true", "data-ignore-morph": True,
-                  "role": "textbox", "aria-label": "New task name",
-                  "data-on:keydown": "if(event.key==='Enter'){event.preventDefault(); let n=el.innerText.trim(); if(n){@post('/tasks/add?name='+encodeURIComponent(n))} el.innerText=''}"}),
-            Button({"data-on:click": "var inp=el.closest('.controls').querySelector('[contenteditable]'); var n=inp.innerText.trim(); if(n){@post('/tasks/add?name='+encodeURIComponent(n))} inp.innerText=''"}, "Add")),
-        Div({"id": "task-list", "style": "width:100%",
-             "data-on:click": "const btn = evt.target.closest('[data-url]'); if (btn) @post(btn.dataset.url)"}),
-        Div({"id": "rate-toggle"}, rate_toggle(get_tasks_rate(sid))),
-        sigs=sigs, show_clock=show_clock, user=user)
-
-async def h_tasks(c: Context, w: Writer):
-    sid = get_sid(c, w)
-    user = get_session_user(sid)
-    w.html(safe(tasks_view(sid, user)))
 
 LANDING_CSS = """
 .landing { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2rem; min-height: 100svh; padding: 2rem; }
@@ -389,7 +325,41 @@ LANDING_CSS = """
 @media (prefers-color-scheme: light) { .btn-public:hover { color: #222; } }
 """
 
-GOOGLE_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>'
+# ---------------------------------------------------------------------------
+# Page shells
+# ---------------------------------------------------------------------------
+
+def shell(*content_children, title="Tasks", stream_url="/tasks/stream", user=None):
+    return Html({"lang": "en"},
+        Head(
+            Meta({"charset": "UTF-8"}),
+            Meta({"name": "viewport", "content": "width=device-width, initial-scale=1.0"}),
+            Title(title),
+            Script({"type": "module", "src": "https://cdn.jsdelivr.net/gh/starfederation/datastar@1.0.0-RC.8/bundles/datastar.js"}),
+            Style(CSS),
+            Link({"rel": "icon", "type": "image/svg+xml", "href": "/favicon.svg"})),
+        Body(
+            Div({"class": "page",
+                 "data-init": f"@get('{stream_url}', {{openWhenHidden: true}})"},
+                Div({"class": "app-header"},
+                    Span({"class": "app-logo"}, Safe(LOGO_SVG), "Timer"),
+                    Div({"class": "header-actions"},
+                        A({"href": "/logout", "class": "auth-link"}, "Sign out") if user else A({"href": "/oauth/google", "class": "auth-link"}, "Sign in"),
+                        A({"href": "https://github.com/Deufel/clock", "target": "_blank", "class": "gh-link", "aria-label": "Source code"}, Safe(GH_SVG)))),
+                P({"class": "meta", "id": "meta"}),
+                Div({"class": "content"}, *content_children))))
+
+def tasks_view(sid, user=None):
+    return shell(
+        Div({"class": "controls", "style": "width:100%"},
+            Span({"class": "task-input", "contenteditable": "true", "data-ignore-morph": True,
+                  "role": "textbox", "aria-label": "New task name",
+                  "data-on:keydown": "if(event.key==='Enter'){event.preventDefault(); let n=el.innerText.trim(); if(n){@post('/tasks/add?name='+encodeURIComponent(n))} el.innerText=''}"}),
+            Button({"data-on:click": "var inp=el.closest('.controls').querySelector('[contenteditable]'); var n=inp.innerText.trim(); if(n){@post('/tasks/add?name='+encodeURIComponent(n))} inp.innerText=''"}, "Add")),
+        Div({"id": "task-list", "style": "width:100%",
+             "data-on:click": "const btn = evt.target.closest('[data-url]'); if (btn) @post(btn.dataset.url)"}),
+        Div({"id": "rate-toggle"}, rate_toggle(get_tasks_rate(sid))),
+        user=user)
 
 def landing_page():
     return Html({"lang": "en"},
@@ -400,138 +370,15 @@ def landing_page():
             Style(CSS + LANDING_CSS)),
         Body(
             Div({"class": "landing"},
-                Span({"class": "landing-logo"}, SafeString(LOGO_SVG), "Timer"),
+                Span({"class": "landing-logo"}, Safe(LOGO_SVG), "Timer"),
                 P({"class": "landing-subtitle"}, "Track your time, simply."),
                 Div({"class": "landing-actions"},
-                    A({"href": "/oauth/google", "class": "btn-google"}, SafeString(GOOGLE_ICON), "Sign in with Google"),
+                    A({"href": "/oauth/google", "class": "btn-google"}, Safe(GOOGLE_ICON), "Sign in with Google"),
                     A({"href": "/tasks", "class": "btn-public"}, "Use without an account")))))
 
-async def h_home(c: Context, w: Writer):
-    sid = c.req.cookies.get("sid", "")
-    if valid_session(sid) and get_session_user(sid):
-        w.redirect("/tasks")
-    else:
-        w.html(safe(landing_page()))
-
-async def h_oauth_google(c: Context, w: Writer):
-    redirect_uri = f"https://{c.req.headers.get('host', 'localhost')}/oauth/callback"
-    params = {
-        "client_id": GOOGLE_CLIENT_ID,
-        "redirect_uri": redirect_uri,
-        "response_type": "code",
-        "scope": "email profile",
-        "access_type": "offline",
-        "prompt": "consent",
-    }
-    w.redirect(f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}")
-
-async def h_oauth_callback(c: Context, w: Writer):
-    code = c.req.query.get("code")
-    if not code:
-        w.redirect("/?error=oauth_failed")
-        return
-    redirect_uri = f"https://{c.req.headers.get('host', 'localhost')}/oauth/callback"
-    # Exchange code for tokens
-    token_resp = httpx.post("https://oauth2.googleapis.com/token", data={
-        "client_id": GOOGLE_CLIENT_ID,
-        "client_secret": GOOGLE_CLIENT_SECRET,
-        "code": code,
-        "redirect_uri": redirect_uri,
-        "grant_type": "authorization_code",
-    }, timeout=10.0)
-    if token_resp.status_code != 200:
-        w.redirect("/?error=token_failed")
-        return
-    token_data = token_resp.json()
-    # Get user info
-    user_resp = httpx.get("https://www.googleapis.com/oauth2/v3/userinfo",
-        headers={"Authorization": f"Bearer {token_data['access_token']}"},
-        timeout=10.0)
-    if user_resp.status_code != 200:
-        w.redirect("/?error=userinfo_failed")
-        return
-    info = user_resp.json()
-    email = info["email"].lower()
-    name = info.get("name", email.split("@")[0])
-    google_id = info["sub"]
-    # Get or create session
-    sid = get_sid(c, w)
-    user, sid = find_or_create_user_and_link(sid, email, name, google_id)
-    # Update cookie if sid changed
-    w.cookie("sid", sid, httponly=True, secure=True, samesite="Lax", path="/")
-    w.redirect("/tasks")
-
-async def h_logout(c: Context, w: Writer):
-    w.cookie("sid", "", httponly=True, secure=True, samesite="Lax", path="/", max_age=0)
-    w.redirect("/")
-
-async def h_show_clock(c: Context, w: Writer):
-    sid = get_sid(c, w)
-    s = await c.signals()
-    set_json(sid, "show_clock", bool(s.get("showClock", False)))
-    relay.publish(f"tasks.{sid}.update", None)
-
-async def h_tasks_rate(c: Context, w: Writer):
-    sid = get_sid(c, w)
-    key = c.req.query.get("r", "1s")
-    rate = RATE_MAP.get(key, 1.0)
-    set_json(sid, "tasks_rate", rate)
-    w.patch(safe(rate_toggle(rate)), mode="inner", selector="#rate-toggle")
-    relay.publish(f"tasks.{sid}.rate", None)
-    relay.publish(f"tasks.{sid}.update", None)
-
-async def h_tasks_stream(c: Context, w: Writer):
-    sid = get_sid(c, w)
-    await _tasks_loop(w, sid)
-
-async def h_task_add(c: Context, w: Writer):
-    sid = get_sid(c, w)
-    name = c.req.query.get("name", "").strip()
-    if name: cmd_task_add(sid, name)
-
-async def h_task_track(c: Context, w: Writer):
-    sid = get_sid(c, w)
-    cmd_task_track(sid, int(c.req.query.get("id", "0")))
-
-async def h_task_stop(c: Context, w: Writer):
-    sid = get_sid(c, w)
-    cmd_task_stop(sid, int(c.req.query.get("id", "0")))
-
-async def h_task_done(c: Context, w: Writer):
-    sid = get_sid(c, w)
-    cmd_task_done(sid, int(c.req.query.get("id", "0")))
-
-async def h_task_edit(c: Context, w: Writer):
-    tid = int(c.req.query.get("id", "0"))
-    t = get_task(tid)
-    if t:
-        w.patch(safe(task_row_editing(t)), selector=f"#task-row-{tid}")
-        w.script("setTimeout(() => { let el = document.querySelector('#task-row-" + str(tid) + " [contenteditable]'); if(el){el.focus(); let r=document.createRange(); r.selectNodeContents(el); let s=window.getSelection(); s.removeAllRanges(); s.addRange(r)} }, 50)")
-
-async def h_task_rename(c: Context, w: Writer):
-    sid = get_sid(c, w)
-    tid = int(c.req.query.get("id", "0"))
-    name = c.req.query.get("name", "").strip()
-    if name: cmd_task_rename(sid, tid, name)
-    relay.publish(f"tasks.{sid}.update", None)
-
-def is_admin(c, w):
-    "Check if current user is the admin. Returns True/False."
-    sid = c.req.cookies.get("sid", "")
-    if not valid_session(sid): return False
-    user = get_session_user(sid)
-    if not user: return False
-    return user["email"] == ADMIN_EMAIL
-
-def fmt_duration(secs):
-    "Format seconds into a human-readable string"
-    if secs < 60: return f"{secs:.0f}s"
-    if secs < 3600:
-        m, s = divmod(int(secs), 60)
-        return f"{m}m {s}s"
-    h, rem = divmod(int(secs), 3600)
-    m = rem // 60
-    return f"{h}h {m}m"
+# ---------------------------------------------------------------------------
+# Admin
+# ---------------------------------------------------------------------------
 
 def admin_page(stats):
     rows = [
@@ -566,29 +413,159 @@ def admin_page(stats):
                 P({"style": "margin-top:1.5rem; text-align:center"},
                     A({"href": "/tasks"}, "← Back to tasks")))))
 
-async def h_admin(c: Context, w: Writer):
-    if not is_admin(c, w):
-        w.redirect("/")
-        return
-    stats = admin_stats()
-    w.html(safe(admin_page(stats)))
+# ---------------------------------------------------------------------------
+# SSE update helper
+# ---------------------------------------------------------------------------
 
-async def h_health(c: Context, w: Writer): w.text("ok")
+def _yield_update(sid, tasks=None):
+    if tasks is None: tasks = get_tasks(sid)
+    meta_text, title_text = make_meta(sid, tasks)
+    return [
+        patch_elements(task_panel(tasks), mode="inner", selector="#task-list"),
+        patch_elements(to_html(P({"class": "meta", "id": "meta"}, meta_text))),
+        patch_elements(to_html(Title(title_text))),
+    ]
 
-async def bootstrap(app: Stario, span: Span):
-    app.get("/", h_home)
-    app.get("/oauth/google", h_oauth_google)
-    app.get("/oauth/callback", h_oauth_callback)
-    app.get("/logout", h_logout)
-    app.get("/tasks", h_tasks)
-    app.get("/tasks/stream", h_tasks_stream)
-    app.post("/tasks/rate", h_tasks_rate)
-    app.post("/tasks/show-clock", h_show_clock)
-    app.post("/tasks/add", h_task_add)
-    app.post("/tasks/track", h_task_track)
-    app.post("/tasks/stop", h_task_stop)
-    app.post("/tasks/done", h_task_done)
-    app.post("/tasks/edit", h_task_edit)
-    app.post("/tasks/rename", h_task_rename)
-    app.get("/admin", h_admin)
-    app.get("/health", h_health)
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+@app.get("/")
+async def home(req):
+    if req["user"]:
+        return ("/tasks", 302)
+    return landing_page()
+
+
+@app.get("/tasks")
+async def tasks(req):
+    return tasks_view(req["sid"], req["user"])
+
+
+@app.get("/tasks/stream")
+async def tasks_stream(req):
+    sid = req["sid"]
+    for ev in _yield_update(sid): yield ev
+    tick = asyncio.create_task(_tasks_ticker(sid))
+    try:
+        async for _, _ in relay.subscribe(f"tasks.{sid}.*"):
+            for ev in _yield_update(sid): yield ev
+    finally:
+        tick.cancel()
+
+
+@app.post("/tasks/rate")
+async def tasks_rate(req):
+    sid = req["sid"]
+    key = req["query"].get("r", "1s")
+    rate = RATE_MAP.get(key, 1.0)
+    set_json(sid, "tasks_rate", rate)
+    relay.publish(f"tasks.{sid}.rate", None)
+    relay.publish(f"tasks.{sid}.update", None)
+    yield patch_elements(to_html(rate_toggle(rate)), mode="inner", selector="#rate-toggle")
+
+
+@app.post("/tasks/add")
+async def task_add(req):
+    name = req["query"].get("name", "").strip()
+    if name: cmd_task_add(req["sid"], name)
+    return None
+
+
+@app.post("/tasks/track")
+async def task_track(req):
+    cmd_task_track(req["sid"], int(req["query"].get("id", "0")))
+    return None
+
+
+@app.post("/tasks/stop")
+async def task_stop(req):
+    cmd_task_stop(req["sid"], int(req["query"].get("id", "0")))
+    return None
+
+
+@app.post("/tasks/done")
+async def task_done(req):
+    cmd_task_done(req["sid"], int(req["query"].get("id", "0")))
+    return None
+
+
+@app.post("/tasks/rename")
+async def task_rename(req):
+    sid = req["sid"]
+    tid = int(req["query"].get("id", "0"))
+    name = req["query"].get("name", "").strip()
+    if name: cmd_task_rename(sid, tid, name)
+    return None
+
+
+@app.get("/oauth/google")
+async def oauth_google(req):
+    redirect_uri = f"https://{req['headers'].get('host', 'localhost')}/oauth/callback"
+    params = {
+        "client_id": GOOGLE_CLIENT_ID,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": "email profile",
+        "access_type": "offline",
+        "prompt": "consent",
+    }
+    return (f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}", 302)
+
+
+@app.get("/oauth/callback")
+async def oauth_callback(req):
+    code = req["query"].get("code")
+    if not code:
+        return ("/?error=oauth_failed", 302)
+    redirect_uri = f"https://{req['headers'].get('host', 'localhost')}/oauth/callback"
+    token_resp = httpx.post("https://oauth2.googleapis.com/token", data={
+        "client_id": GOOGLE_CLIENT_ID,
+        "client_secret": GOOGLE_CLIENT_SECRET,
+        "code": code,
+        "redirect_uri": redirect_uri,
+        "grant_type": "authorization_code",
+    }, timeout=10.0)
+    if token_resp.status_code != 200:
+        return ("/?error=token_failed", 302)
+    token_data = token_resp.json()
+    user_resp = httpx.get("https://www.googleapis.com/oauth2/v3/userinfo",
+        headers={"Authorization": f"Bearer {token_data['access_token']}"},
+        timeout=10.0)
+    if user_resp.status_code != 200:
+        return ("/?error=userinfo_failed", 302)
+    info = user_resp.json()
+    email = info["email"].lower()
+    name = info.get("name", email.split("@")[0])
+    google_id = info["sub"]
+    sid = req["sid"]
+    user, sid = find_or_create_user_and_link(sid, email, name, google_id)
+    _write_sid(req, sid)
+    return ("/tasks", 302)
+
+
+@app.get("/logout")
+async def logout(req):
+    set_cookie(req, "sid", "", httponly=True, secure=True, samesite="Lax", path="/", max_age=0)
+    return ("/", 302)
+
+
+@app.get("/admin")
+async def admin(req):
+    user = req["user"]
+    if not user or user["email"] != ADMIN_EMAIL:
+        return ("/", 302)
+    return admin_page(admin_stats())
+
+
+@app.get("/health")
+async def health(req):
+    return "ok"
+
+
+# ---------------------------------------------------------------------------
+# Embedded server
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    serve(app, host="0.0.0.0", port=8000)
