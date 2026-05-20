@@ -1,22 +1,25 @@
-// Package handlers wires HTTP routes to the state package and auth package.
+// Package handlers wires HTTP routes to the state and auth packages.
 package handlers
 
 import (
 	"context"
-	"encoding/json"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/Deufel/clock-go/internal/auth"
-	"github.com/Deufel/clock-go/internal/state"
-	"github.com/Deufel/clock-go/web"
+	"github.com/Deufel/clock/internal/auth"
+	"github.com/Deufel/clock/internal/state"
+	"github.com/Deufel/clock/web"
 
 	"github.com/a-h/templ"
 	datastar "github.com/starfederation/datastar-go/datastar"
 )
+
+// tickInterval is the SSE re-render cadence while at least one task is
+// actively tracking. ~60fps.
+const tickInterval = 16 * time.Millisecond
 
 type Server struct {
 	DB         *state.DB
@@ -39,7 +42,6 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /tasks/stop", s.handleStop)
 	mux.HandleFunc("POST /tasks/done", s.handleDone)
 	mux.HandleFunc("POST /tasks/rename", s.handleRename)
-	mux.HandleFunc("POST /tasks/rate", s.handleRate)
 
 	mux.HandleFunc("GET /oauth/google", s.handleOAuthStart)
 	mux.HandleFunc("GET /oauth/callback", s.handleOAuthCallback)
@@ -52,10 +54,9 @@ func (s *Server) Routes() http.Handler {
 	return mux
 }
 
-// ---- Session middleware (called explicitly per handler) --------------------
+// ---- Session middleware ----------------------------------------------------
 
-// session returns the effective session id, creating one if needed. The
-// cookie is written back on creation.
+// session returns the effective session id, creating one if needed.
 func (s *Server) session(w http.ResponseWriter, r *http.Request) (string, error) {
 	if raw := s.Signer.ReadSignedCookie(r, "sid"); raw != "" && s.DB.ValidSession(raw) {
 		return raw, nil
@@ -64,7 +65,7 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request) (string, error)
 	if err != nil {
 		return "", err
 	}
-	s.Signer.SetSignedCookie(w, "sid", sid, 60*60*24*365) // 1 year
+	s.Signer.SetSignedCookie(w, "sid", sid, 60*60*24*365)
 	return sid, nil
 }
 
@@ -77,35 +78,7 @@ func (s *Server) sessionUser(sid string) *state.User {
 	return u
 }
 
-// ---- Helpers ---------------------------------------------------------------
-
-// rateKey looks up the JSON-encoded rate key for a session; default is "1s".
-func (s *Server) rateKey(sid string) string {
-	if v, ok := s.DB.GetJSON(sid, "tasks_rate"); ok {
-		var k string
-		if err := json.Unmarshal([]byte(v), &k); err == nil && k != "" {
-			return k
-		}
-	}
-	return "1s"
-}
-
-// rateSeconds maps a rate key to a duration. 0 = ticker paused.
-func rateSeconds(k string) float64 {
-	switch k {
-	case "live":
-		return 0.016
-	case "1s":
-		return 1.0
-	case "1m":
-		return 60.0
-	default:
-		return 0
-	}
-}
-
-// publicURL returns the base URL for building OAuth redirect_uris. Prefers
-// the configured value; falls back to inferring from request.
+// publicURL returns the base URL for building OAuth redirect_uris.
 func (s *Server) publicURL(r *http.Request) string {
 	if s.PublicURL != "" {
 		return s.PublicURL
@@ -115,6 +88,21 @@ func (s *Server) publicURL(r *http.Request) string {
 		scheme = "http"
 	}
 	return scheme + "://" + r.Host
+}
+
+// anyTracking reports whether this session has at least one task actively
+// being tracked.
+func (s *Server) anyTracking(sid string) bool {
+	tasks, err := s.DB.GetTasks(sid, false)
+	if err != nil {
+		return false
+	}
+	for _, t := range tasks {
+		if t.Tracking() {
+			return true
+		}
+	}
+	return false
 }
 
 // ---- Handlers --------------------------------------------------------------
@@ -149,12 +137,20 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	content := web.TasksContent(sid, tasks, s.rateKey(sid))
+	content := web.TasksContent(sid, tasks)
 	templ.Handler(web.Shell("Timer", "/tasks/stream", user, content)).ServeHTTP(w, r)
 }
 
-// handleStream is the long-lived SSE connection. Sends one fat morph + a
-// title-update script on every state change for this session.
+// handleStream is the long-lived SSE connection.
+//
+// Two sources of re-render:
+//  1. State changes (add/track/stop/done/rename) publish "tasks.{sid}.update"
+//     via the hub. The subscriber wakes and re-renders.
+//  2. A per-session ticker emits ticks while at least one task is tracking.
+//     Each tick re-renders so elapsed time advances smoothly on-screen.
+//
+// The ticker is dormant when nothing is being tracked — a session with no
+// active tracking costs zero CPU between state changes.
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	sid, err := s.session(w, r)
 	if err != nil {
@@ -164,17 +160,14 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 
 	sse := datastar.NewSSE(w, r)
 
-	// Subscribe to all topics for this session.
 	prefix := "tasks." + sid + "."
 	updates, unsub := s.Hub.Subscribe(prefix)
 	defer unsub()
 
-	// Start a per-session ticker.
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	go s.runTicker(ctx, sid)
 
-	// Initial render.
 	if err := s.pushUpdate(sse, sid); err != nil {
 		return
 	}
@@ -183,11 +176,10 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			return
-		case topic, ok := <-updates:
+		case _, ok := <-updates:
 			if !ok {
 				return
 			}
-			_ = topic // we don't need to disambiguate
 			if err := s.pushUpdate(sse, sid); err != nil {
 				return
 			}
@@ -195,51 +187,48 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// pushUpdate sends one full re-render plus a title script.
+// pushUpdate sends one fat morph of the live region.
 func (s *Server) pushUpdate(sse *datastar.ServerSentEventGenerator, sid string) error {
 	tasks, err := s.DB.GetTasks(sid, false)
 	if err != nil {
 		log.Printf("pushUpdate get tasks: %v", err)
 		return err
 	}
-	rate := s.rateKey(sid)
-	if err := sse.PatchElementTempl(web.LiveRegion(sid, tasks, rate)); err != nil {
-		return err
-	}
-	title := web.TitleText(tasks)
-	// JSON-encode the title for safe injection into a script literal.
-	encoded, _ := json.Marshal(title)
-	return sse.ExecuteScript("document.title = " + string(encoded))
+	return sse.PatchElementTempl(web.LiveRegion(tasks))
 }
 
-// runTicker emits "tick" events at the session's configured rate. A rate
-// change publishes "tasks.{sid}.rate" which wakes this goroutine so it
-// picks up the new interval immediately.
+// runTicker emits "tick" events at tickInterval while anyTracking(sid) is
+// true. When nothing is tracking, it sleeps on the hub and wakes only when
+// the session's state changes (a "tasks.{sid}.update" event), at which
+// point it re-evaluates whether to start ticking again.
 func (s *Server) runTicker(ctx context.Context, sid string) {
-	rateCh, unsub := s.Hub.Subscribe("tasks." + sid + ".rate")
+	wake, unsub := s.Hub.Subscribe("tasks." + sid + ".update")
 	defer unsub()
 
 	for {
-		secs := rateSeconds(s.rateKey(sid))
-		if secs == 0 {
-			// Paused; wait for rate change or shutdown.
+		if s.anyTracking(sid) {
 			select {
 			case <-ctx.Done():
 				return
-			case <-rateCh:
+			case <-wake:
+				// State changed — loop and re-check.
+				continue
+			case <-time.After(tickInterval):
+				s.Hub.Publish("tasks." + sid + ".tick")
+			}
+		} else {
+			select {
+			case <-ctx.Done():
+				return
+			case <-wake:
+				// Something changed; re-check whether to start ticking.
 				continue
 			}
 		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-rateCh:
-			continue
-		case <-time.After(time.Duration(secs * float64(time.Second))):
-			s.Hub.Publish("tasks." + sid + ".tick")
-		}
 	}
 }
+
+// ---- Commands --------------------------------------------------------------
 
 func (s *Server) handleAdd(w http.ResponseWriter, r *http.Request) {
 	sid, _ := s.session(w, r)
@@ -300,39 +289,21 @@ func (s *Server) handleRename(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) handleRate(w http.ResponseWriter, r *http.Request) {
-	sid, _ := s.session(w, r)
-	k := r.URL.Query().Get("r")
-	switch k {
-	case "live", "1s", "1m", "off":
-	default:
-		k = "1s"
-	}
-	encoded, _ := json.Marshal(k)
-	if err := s.DB.SetJSON(sid, "tasks_rate", string(encoded)); err != nil {
-		log.Printf("SetJSON rate: %v", err)
-	}
-	s.Hub.Publish("tasks." + sid + ".rate")
-	s.Hub.Publish("tasks." + sid + ".update")
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// ---- OAuth ----
+// ---- OAuth ----------------------------------------------------------------
 
 func (s *Server) handleOAuthStart(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.session(w, r); err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	state, err := auth.NewRandomState()
+	csrf, err := auth.NewRandomState()
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	// Short-lived state cookie (5 min) signed with our key.
-	s.Signer.SetSignedCookie(w, "oauth_state", state, 300)
+	s.Signer.SetSignedCookie(w, "oauth_state", csrf, 300)
 	redir := s.publicURL(r) + "/oauth/callback"
-	http.Redirect(w, r, s.Google.AuthorizeURL(redir, state), http.StatusFound)
+	http.Redirect(w, r, s.Google.AuthorizeURL(redir, csrf), http.StatusFound)
 }
 
 func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
@@ -342,7 +313,6 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// CSRF check.
 	wantState := s.Signer.ReadSignedCookie(r, "oauth_state")
 	gotState := r.URL.Query().Get("state")
 	if wantState == "" || gotState == "" || wantState != gotState {
@@ -366,7 +336,6 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	email := strings.ToLower(info.Email)
 	name := info.Name
 	if name == "" {
-		// Fallback to local-part of email.
 		if i := strings.Index(email, "@"); i > 0 {
 			name = email[:i]
 		}
@@ -388,7 +357,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
-// ---- Admin / health -------------------------------------------------------
+// ---- Admin / health --------------------------------------------------------
 
 func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 	sid, err := s.session(w, r)
@@ -406,7 +375,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	activeSubs, totalTicks, droppedTicks := s.Hub.Stats()
+	activeSubs, totalPubs, droppedPubs := s.Hub.Stats()
 
 	rows := []web.StatRow{
 		{"Users", strconv.Itoa(stats.Users)},
@@ -418,9 +387,9 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		{"Tasks (completed)", strconv.Itoa(stats.TasksDone)},
 		{"Tasks (tracking now)", strconv.Itoa(stats.TasksTracking)},
 		{"Total time tracked", web.FmtDuration(stats.TotalElapsed)},
-		{"Hub: active subscribers", strconv.FormatInt(activeSubs, 10)},
-		{"Hub: total publishes", strconv.FormatInt(totalTicks, 10)},
-		{"Hub: dropped publishes", strconv.FormatInt(droppedTicks, 10)},
+		{"Hub subscribers", strconv.FormatInt(activeSubs, 10)},
+		{"Hub publishes (total)", strconv.FormatInt(totalPubs, 10)},
+		{"Hub publishes (dropped)", strconv.FormatInt(droppedPubs, 10)},
 	}
 	templ.Handler(web.Admin(rows)).ServeHTTP(w, r)
 }

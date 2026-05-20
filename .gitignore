@@ -1,15 +1,20 @@
-
-# Python-generated files
-__pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
-
-# Virtual environments
-.venv
+# Secrets
 .env
+*.env.local
 
-# Data
-data/
+# Build artifacts
+clock-go
+*.exe
+
+# SQLite (data lives separately in prod via Litestream)
+*.db
+*.db-shm
+*.db-wal
+
+# templ-generated files. Regenerated on build, no need to commit.
+# (Uncomment the next line if you decide not to commit them.)
+# *_templ.go
+
+# IDE
+.vscode/
+.idea/

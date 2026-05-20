@@ -2,272 +2,211 @@ package web
 
 import (
 	"fmt"
-	"strings"
 
-	"github.com/Deufel/clock-go/internal/state"
+	"github.com/Deufel/clock/internal/state"
 )
 
-// -------- Format helpers used by templates ---------
+// stickCSSHref is pinned to your toolbox repo. Bump the commit when you ship
+// changes to the framework.
+const stickCSSHref = "https://cdn.jsdelivr.net/gh/Deufel/toolbox@master/css/style.css"
 
-func To12(h int) (int, string) {
-	hh := h % 12
-	if hh == 0 {
-		hh = 12
-	}
-	if h < 12 {
-		return hh, "AM"
-	}
-	return hh, "PM"
-}
+// datastarSrc is the Datastar bundle.
+const datastarSrc = "https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.1/bundles/datastar.js"
 
-// FmtElapsed renders a duration in either "Mm:SS.cc" or "Hh MMm SSs".
-func FmtElapsed(secs float64) string {
-	if secs >= 3600 {
-		s := int(secs)
-		hh := s / 3600
-		rem := s - hh*3600
-		mm := rem / 60
-		ss := rem - mm*60
-		cs := int(secs*100) % 100
-		return fmt.Sprintf("%dh %02dm %02d.%02ds", hh, mm, ss, cs)
-	}
-	s := int(secs)
-	mm := s / 60
-	ss := secs - float64(mm*60)
-	return fmt.Sprintf("%02d:%05.2f", mm, ss)
-}
-
-// FmtDuration renders a coarser duration for the admin page.
-func FmtDuration(secs float64) string {
-	switch {
-	case secs < 60:
-		return fmt.Sprintf("%.0fs", secs)
-	case secs < 3600:
-		s := int(secs)
-		return fmt.Sprintf("%dm %ds", s/60, s%60)
-	default:
-		s := int(secs)
-		return fmt.Sprintf("%dh %dm", s/3600, (s%3600)/60)
-	}
-}
-
-// RateLabel maps an internal key to its UI label.
-func RateLabel(k string) string {
-	switch k {
-	case "live":
-		return "Live"
-	case "1s":
-		return "1s"
-	case "1m":
-		return "1m"
-	case "off":
-		return "Off"
-	}
-	return k
-}
-
-// RateOptions lists the rate keys in the order they should appear in the UI.
-var RateOptions = []string{"live", "1s", "1m", "off"}
-
-// EscapeAttr returns a string safe to drop into an HTML attribute value.
-func EscapeAttr(s string) string {
-	r := strings.NewReplacer(`"`, "&quot;", "&", "&amp;", "<", "&lt;", ">", "&gt;")
-	return r.Replace(s)
-}
-
-// ColorForIndex returns one of a small palette by index, with wraparound.
-func ColorForIndex(i int) string {
-	colors := []string{"#e54", "#2a2", "#47f", "#f90", "#c4f", "#0cc", "#fa0", "#f47"}
-	return colors[i%len(colors)]
-}
-
-// ---------- Templates ----------
+// ---------------------------------------------------------------------------
+// Shell — used by /tasks and /admin. Landing has its own simpler shell.
+// ---------------------------------------------------------------------------
 
 templ Shell(title, streamURL string, user *state.User, content templ.Component) {
 	<!DOCTYPE html>
-	<html lang="en">
+	<html lang="en" data-ui-theme="dark">
 		<head>
 			<meta charset="UTF-8"/>
 			<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 			<title>{ title }</title>
-			<script type="module" src="https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.1/bundles/datastar.js"></script>
-			<style>{ AppCSS() }</style>
+			<link rel="stylesheet" href={ stickCSSHref }/>
 			<link rel="icon" type="image/svg+xml" href="/favicon.svg"/>
+			<script type="module" src={ datastarSrc }></script>
 		</head>
-		<body>
-			<div class="page" data-init={ fmt.Sprintf("@get('%s', {openWhenHidden: true})", streamURL) }>
-				<div class="app-header">
-					<span class="app-logo">
-						@templ.Raw(LogoSVG)
-						Timer
-					</span>
-					<div class="header-actions">
-						if user != nil {
-							<a href="/logout" class="auth-link">Sign out</a>
-						} else {
-							<a href="/oauth/google" class="auth-link">Sign in</a>
-						}
-						<a href="https://github.com/Deufel/clock-go" target="_blank" class="gh-link" aria-label="Source code">
-							@templ.Raw(GitHubSVG)
-						</a>
-					</div>
-				</div>
-				<div class="content">
-					@content
-				</div>
+		<body
+			class="page stage"
+			data-signals="{theme: 'dark', typeIdx: 1, hue: 18}"
+			data-effect="document.documentElement.setAttribute('data-ui-theme', $theme); document.documentElement.style.setProperty('--hue', $hue); document.documentElement.style.setProperty('--scale', ['0.85', '1', '1.15'][$typeIdx])"
+			data-init={ fmt.Sprintf("@get('%s', {openWhenHidden: true})", streamURL) }
+		>
+			<div class="pg-banner flank-end" style="--hue-shift: 30; --bg: 0.55; --fg: -1; --type: -0.5">
+				<span>
+					<strong>Demo</strong> — portfolio project. Real-time, server-driven, single-binary Go.
+					<a href="https://github.com/Deufel/clock" target="_blank" rel="noopener" style="color: inherit; text-decoration: underline">Source</a>.
+				</span>
+				<button class="icon-btn" aria-label="Dismiss" onclick="this.parentElement.remove()">✕</button>
 			</div>
+			<header class="pg-header flank-end">
+				<a href="/tasks" class="row" style="--type: 1; text-decoration: none; align-items: center; gap: 0.5em">
+					@templ.Raw(LogoSVG)
+					<span>Timer</span>
+				</a>
+				<div class="row" style="align-items: center; gap: 0.6em">
+					if user != nil {
+						<span style="--type: -1; --fg: -0.5" class="tablet desktop">{ user.Email }</span>
+						<a href="/logout" class="link" style="--type: -1">Sign out</a>
+					} else {
+						<a href="/oauth/google" class="link" style="--type: -1">Sign in</a>
+					}
+					@ThemeControls()
+					<a href="https://github.com/Deufel/clock" target="_blank" rel="noopener" aria-label="Source" style="color: inherit; display: inline-flex">
+						@templ.Raw(GitHubSVG)
+					</a>
+				</div>
+			</header>
+			<main class="pg-main">
+				@content
+			</main>
 		</body>
 	</html>
 }
 
-templ TasksContent(sid string, tasks []state.Task, rate string) {
-	<div class="controls" style="width:100%">
-		<span
-			class="task-input"
-			contenteditable="true"
-			data-ignore-morph
-			role="textbox"
-			aria-label="New task name"
-			data-on-keydown="if(event.key==='Enter'){event.preventDefault(); let n=el.innerText.trim(); if(n){@post('/tasks/add?name='+encodeURIComponent(n))} el.innerText=''}"
-		></span>
-		<button data-on-click="var inp=el.closest('.controls').querySelector('[contenteditable]'); var n=inp.innerText.trim(); if(n){@post('/tasks/add?name='+encodeURIComponent(n))} inp.innerText=''">Add</button>
-	</div>
-	@LiveRegion(sid, tasks, rate)
+// ThemeControls renders the palette / theme / type-scale icon buttons.
+// Reads from $theme, $hue, $typeIdx — these signals must be declared on an
+// ancestor element (Shell declares them on body).
+templ ThemeControls() {
+	<button class="icon-btn" aria-label="Cycle color palette" data-on:click="$hue = ($hue + 30) % 360" title="Cycle color palette">
+		@templ.Raw(PaletteSVG)
+	</button>
+	<button class="icon-btn" aria-label="Toggle theme" data-on:click="$theme = $theme === 'light' ? 'dark' : 'light'" title="Toggle theme">
+		@templ.Raw(MoonSVG)
+	</button>
+	<button class="icon-btn" aria-label="Cycle text size" data-on:click="$typeIdx = ($typeIdx + 1) % 3" title="Cycle text size">
+		@templ.Raw(TypeSizeSVG)
+	</button>
 }
 
-// LiveRegion is the fat-morph target. Everything inside #live re-renders on
-// every state change.
-templ LiveRegion(sid string, tasks []state.Task, rate string) {
-	<div id="live">
-		<p class="meta" id="meta">{ MetaText(tasks) }</p>
-		<div id="task-list" style="width:100%" data-on-click="const btn = evt.target.closest('[data-url]'); if (btn) @post(btn.dataset.url)">
-			@TaskPanel(tasks)
-		</div>
-		<div id="rate-toggle">
-			@RateToggle(rate)
-		</div>
-	</div>
-}
-
-templ TaskPanel(tasks []state.Task) {
-	<div id="task-bar">
-		@TaskBar(tasks)
-	</div>
-	@TaskList(tasks)
-}
-
-templ TaskList(tasks []state.Task) {
-	if len(tasks) == 0 {
-		<p class="task-empty">no tasks yet</p>
-	} else {
-		<ul class="task-list">
-			for _, t := range tasks {
-				@TaskRow(t)
-			}
-		</ul>
-	}
-}
-
-templ TaskRow(t state.Task) {
-	<li class="task-row" id={ fmt.Sprintf("task-row-%d", t.ID) }>
-		<span
-			class="task-name"
-			contenteditable="true"
-			data-ignore-morph
-			data-on-blur={ fmt.Sprintf("@post('/tasks/rename?id=%d&name=' + encodeURIComponent(el.innerText.trim()))", t.ID) }
-			data-on-keydown="if(event.key==='Enter'){event.preventDefault();el.blur()} if(event.key==='Escape'){el.innerText=el.dataset.original;el.blur()}"
-			data-original={ t.Name }
-		>{ t.Name }</span>
-		<span class="task-time" id={ fmt.Sprintf("task-time-%d", t.ID) }>{ FmtElapsed(t.CurrentElapsed()) }</span>
-		if t.Tracking() {
-			<button class="task-btn on" data-url={ fmt.Sprintf("/tasks/stop?id=%d", t.ID) }>Stop</button>
-		} else {
-			<button class="task-btn" data-url={ fmt.Sprintf("/tasks/track?id=%d", t.ID) }>Track</button>
-		}
-		<button class="task-btn" data-url={ fmt.Sprintf("/tasks/done?id=%d", t.ID) }>✓</button>
-	</li>
-}
-
-templ TaskBar(tasks []state.Task) {
-	{{ total := 0.0 }}
-	for _, t := range tasks {
-		{{ total += t.CurrentElapsed() }}
-	}
-	if total == 0 {
-		<span></span>
-	} else {
-		<div class="task-bar">
-			<div class="bar-track">
-				for i, t := range tasks {
-					{{ e := t.CurrentElapsed() }}
-					if e > 0 {
-						<div
-							class="bar-seg"
-							style={ fmt.Sprintf("width:%.1f%%;background:%s", e/total*100, ColorForIndex(i)) }
-							title={ fmt.Sprintf("%s: %d%%", t.Name, int(e/total*100+0.5)) }
-						></div>
-					}
-				}
-			</div>
-			<div class="bar-legend">
-				for i, t := range tasks {
-					{{ e := t.CurrentElapsed() }}
-					if e > 0 {
-						<span class="bar-legend-item">
-							<span style={ fmt.Sprintf("color:%s", ColorForIndex(i)) }>●</span>
-							{ " " + t.Name + " " }
-							<span class="bar-pct">{ fmt.Sprintf("%d%%", int(e/total*100+0.5)) }</span>
-						</span>
-					}
-				}
-			</div>
-		</div>
-	}
-}
-
-templ RateToggle(current string) {
-	<div class="toggle-bar">
-		for _, k := range RateOptions {
-			if k == current {
-				<button class="active" data-on-click={ fmt.Sprintf("@post('/tasks/rate?r=%s')", k) }>{ RateLabel(k) }</button>
-			} else {
-				<button data-on-click={ fmt.Sprintf("@post('/tasks/rate?r=%s')", k) }>{ RateLabel(k) }</button>
-			}
-		}
-	</div>
-}
-
-// ---------- Landing ----------
+// ---------------------------------------------------------------------------
+// Landing — no shell, no SSE stream. Just a centered CTA.
+// ---------------------------------------------------------------------------
 
 templ Landing() {
 	<!DOCTYPE html>
-	<html lang="en">
+	<html lang="en" data-ui-theme="dark">
 		<head>
 			<meta charset="UTF-8"/>
 			<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 			<title>Timer</title>
-			<style>{ AppCSS() + LandingCSS() }</style>
+			<link rel="stylesheet" href={ stickCSSHref }/>
+			<link rel="icon" type="image/svg+xml" href="/favicon.svg"/>
 		</head>
-		<body>
-			<div class="landing">
-				<span class="landing-logo">
-					@templ.Raw(LogoSVG)
-					Timer
-				</span>
-				<p class="landing-subtitle">Track your time, simply.</p>
-				<div class="landing-actions">
-					<a href="/oauth/google" class="btn-google">
+		<body class="stage">
+			<div class="hud-overlay" style="min-block-size: 100svh; padding: 2rem">
+				<div class="• column" style="align-items: center; gap: 1.5em; max-inline-size: 24rem">
+					<div class="row" style="align-items: center; gap: 0.6em; --type: 2">
+						@templ.Raw(LogoSVG)
+						<span>Timer</span>
+					</div>
+					<p style="--fg: -0.5; text-align: center">A real-time task tracker. Built with Go, Datastar, and stick.css.</p>
+					<a href="/oauth/google" class="btn row" style="--bg: 0.55; gap: 0.6em; align-items: center; text-decoration: none">
 						@templ.Raw(GoogleIconSVG)
-						Sign in with Google
+						<span>Sign in with Google</span>
 					</a>
-					<a href="/tasks" class="btn-public">Use without an account</a>
+					<a href="/tasks" class="link" style="--type: -1">Or continue without an account →</a>
 				</div>
 			</div>
 		</body>
 	</html>
 }
 
-// ---------- Admin ----------
+// ---------------------------------------------------------------------------
+// Tasks page content. Goes inside Shell.
+// ---------------------------------------------------------------------------
+
+templ TasksContent(sid string, tasks []state.Task) {
+	<div class="column" style="max-inline-size: 36rem; margin-inline: auto; gap: 1lh">
+		<form class="row" style="gap: 0.5em; align-items: stretch" data-on:submit="event.preventDefault()">
+			<input
+				id="newtask-input"
+				class="input"
+				type="text"
+				name="name"
+				placeholder="What are you working on?"
+				autocomplete="off"
+				data-on:keydown="if(event.key==='Enter'){event.preventDefault(); const i=document.getElementById('newtask-input'); const n=i.value.trim(); if(n){@post('/tasks/add?name='+encodeURIComponent(n)); i.value=''}}"
+				style="flex: 1"
+			/>
+			<button
+				class="btn"
+				type="button"
+				data-on:click="const i=document.getElementById('newtask-input'); const n=i.value.trim(); if(n){@post('/tasks/add?name='+encodeURIComponent(n)); i.value=''}"
+				style="--bg: 0.55; --type:0;"
+			>Add</button>
+		</form>
+		@LiveRegion(tasks)
+	</div>
+}
+
+// LiveRegion is the fat-morph target. The SSE stream re-renders this whole
+// block on every state change (and at 60fps while anything is tracking).
+templ LiveRegion(tasks []state.Task) {
+	<div id="live" class="column" style="gap: 0.5lh">
+		if len(tasks) == 0 {
+			<p style="--fg: -0.5; text-align: center; padding: 2lh 0">No tasks yet. Add one above.</p>
+		} else {
+			for _, t := range tasks {
+				@TaskRow(t)
+			}
+		}
+	</div>
+}
+
+templ TaskRow(t state.Task) {
+	<div
+		class="card row"
+		id={ fmt.Sprintf("task-%d", t.ID) }
+		style="align-items: center; gap: 0.75em; padding: 0.6em 0.8em"
+	>
+		<span
+			class="task-name"
+			contenteditable="true"
+			data-ignore-morph
+			role="textbox"
+			aria-label="Task name"
+			data-on:blur={ fmt.Sprintf("@post('/tasks/rename?id=%d&name=' + encodeURIComponent(el.innerText.trim()))", t.ID) }
+			data-on:keydown="if(event.key==='Enter'){event.preventDefault();el.blur()} if(event.key==='Escape'){el.innerText=el.dataset.original;el.blur()}"
+			data-original={ t.Name }
+			style="flex: 1; outline: none"
+		>{ t.Name }</span>
+		if t.Tracking() {
+			<span class="tag suc" aria-label="Tracking" style="--type: -1">Tracking</span>
+		}
+		<span
+			class="task-time"
+			style="font-family: var(--font-mono, ui-monospace, monospace); --type: -0.5; --fg: -0.5; min-inline-size: 6em; text-align: right"
+		>{ FmtElapsed(t.CurrentElapsed()) }</span>
+		if t.Tracking() {
+			<button
+				class="btn"
+				data-on:click={ fmt.Sprintf("@post('/tasks/stop?id=%d')", t.ID) }
+				aria-label="Stop tracking"
+				style="--type: -0.5; --bg: 0.7; --hue-lock: 0"
+			>Stop</button>
+		} else {
+			<button
+				class="btn"
+				data-on:click={ fmt.Sprintf("@post('/tasks/track?id=%d')", t.ID) }
+				aria-label="Start tracking"
+				style="--type: -0.5"
+			>Track</button>
+		}
+		<button
+			class="icon-btn"
+			data-on:click={ fmt.Sprintf("@post('/tasks/done?id=%d')", t.ID) }
+			aria-label="Mark done"
+			title="Mark done"
+		>✓</button>
+	</div>
+}
+
+// ---------------------------------------------------------------------------
+// Admin
+// ---------------------------------------------------------------------------
 
 type StatRow struct {
 	Label string
@@ -276,55 +215,28 @@ type StatRow struct {
 
 templ Admin(rows []StatRow) {
 	<!DOCTYPE html>
-	<html lang="en">
+	<html lang="en" data-ui-theme="dark">
 		<head>
 			<meta charset="UTF-8"/>
 			<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-			<title>Admin — Timer</title>
-			<style>{ AppCSS() + AdminCSS() }</style>
+			<title>Admin · Timer</title>
+			<link rel="stylesheet" href={ stickCSSHref }/>
 		</head>
-		<body>
-			<div class="admin">
-				<h1>Admin</h1>
-				<table class="stat-table">
+		<body class="stage" style="padding: 2lh">
+			<div class="column" style="max-inline-size: 32rem; margin-inline: auto; gap: 1lh">
+				<div class="row spread" style="align-items: baseline">
+					<span style="--type: 2">Admin</span>
+					<a class="link" href="/tasks" style="--type: -1">← Tasks</a>
+				</div>
+				<div class="card stage column" style="padding: 1em">
 					for _, r := range rows {
-						<tr>
-							<td>{ r.Label }</td>
-							<td>{ r.Value }</td>
-						</tr>
+						<div class="row spread" style="padding: 0.3em 0; border-bottom: 1px solid var(--border)">
+							<span style="--fg: -0.6">{ r.Label }</span>
+							<span style="font-family: var(--font-mono, ui-monospace, monospace)">{ r.Value }</span>
+						</div>
 					}
-				</table>
-				<p style="margin-top:1.5rem; text-align:center">
-					<a href="/tasks">← Back to tasks</a>
-				</p>
+				</div>
 			</div>
 		</body>
 	</html>
-}
-
-// ---------- Meta text helper used in templates ----------
-
-func MetaText(tasks []state.Task) string {
-	var active *state.Task
-	for i := range tasks {
-		if tasks[i].Tracking() {
-			active = &tasks[i]
-			break
-		}
-	}
-	if active != nil {
-		return fmt.Sprintf("tracking · %s · %s", active.Name, FmtElapsed(active.CurrentElapsed()))
-	}
-	return CurrentTimeMeta()
-}
-
-// TitleText returns the document title for a given task list. Mirrors
-// make_title() in main.py.
-func TitleText(tasks []state.Task) string {
-	for _, t := range tasks {
-		if t.Tracking() {
-			return fmt.Sprintf("%s | %s", CurrentDateTime(), t.Name)
-		}
-	}
-	return CurrentDateTime()
 }

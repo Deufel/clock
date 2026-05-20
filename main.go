@@ -8,9 +8,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/Deufel/clock-go/internal/auth"
-	"github.com/Deufel/clock-go/internal/handlers"
-	"github.com/Deufel/clock-go/internal/state"
+	"github.com/Deufel/clock/internal/auth"
+	"github.com/Deufel/clock/internal/handlers"
+	"github.com/Deufel/clock/internal/state"
 )
 
 func envOr(k, def string) string {
