@@ -1,13 +1,14 @@
-#!/bin/bash
+#!/bin/sh
 set -e
 
 mkdir -p /app/data
 
-# Restore DB from MinIO if it doesn't exist locally
-if [ ! -f /app/data/clock.db ]; then
-    echo "No local DB found, attempting restore from MinIO..."
-    litestream restore -if-replica-exists -config /app/litestream.yml /app/data/clock.db || echo "No backup found, starting fresh."
+# Restore DB from S3 if there's no local copy yet.
+if [ ! -f "$DB_PATH" ]; then
+    echo "No local DB at $DB_PATH, attempting Litestream restore..."
+    litestream restore -if-replica-exists -config /app/litestream.yml "$DB_PATH" || \
+        echo "No backup found, starting with empty DB."
 fi
 
-# Run the app under Litestream (it replicates WAL changes continuously)
-exec litestream replicate -exec "uv run python main.py" -config /app/litestream.yml
+# Replicate WAL changes while the app is running.
+exec litestream replicate -exec "/app/clock-go" -config /app/litestream.yml

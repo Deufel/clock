@@ -1,29 +1,45 @@
-FROM python:3.14-slim
+# syntax=docker/dockerfile:1
+# ---- Build stage ----
+FROM golang:1.24-bookworm AS builder
+
+WORKDIR /src
+
+# Install templ. Using a pinned recent version; bump as needed.
+RUN go install github.com/a-h/templ/cmd/templ@v0.3.819
+
+COPY go.mod ./
+# go.sum may be empty/missing on first build; that's fine — tidy will populate.
+COPY go.sum* ./
+RUN go mod download || true
+
+COPY . .
+
+# Generate .templ -> _templ.go, then build.
+RUN templ generate
+RUN go mod tidy
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/clock-go .
+
+# ---- Litestream stage (small) ----
+FROM litestream/litestream:0.3.13 AS litestream
+
+# ---- Runtime ----
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates tzdata && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# System deps + uv (single layer)
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl wget && \
-    rm -rf /var/lib/apt/lists/* && \
-    curl -LsSf https://astral.sh/uv/install.sh | sh
+COPY --from=builder /out/clock-go /app/clock-go
+COPY --from=litestream /usr/local/bin/litestream /usr/local/bin/litestream
 
-ENV PATH="/root/.local/bin:$PATH"
-
-# Litestream (auto-detect arch)
-RUN ARCH=$(dpkg --print-architecture) && \
-    if [ "$ARCH" = "arm64" ]; then LS_ARCH="arm64"; else LS_ARCH="amd64"; fi && \
-    wget -qO- https://github.com/benbjohnson/litestream/releases/download/v0.3.13/litestream-v0.3.13-linux-${LS_ARCH}.tar.gz | tar xz -C /usr/local/bin
-
-# Dependencies (cached unless lock changes)
-COPY pyproject.toml uv.lock ./
-RUN uv sync --no-dev --frozen
-
-# App code
-COPY . .
+COPY litestream.yml /app/litestream.yml
+COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
-VOLUME /app/data
-HEALTHCHECK --interval=30s --timeout=3s CMD curl -f http://localhost:8000/health || exit 1
+ENV DB_PATH=/app/data/clock-go.db
+ENV PORT=8000
 
+EXPOSE 8000
 ENTRYPOINT ["/app/entrypoint.sh"]

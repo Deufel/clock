@@ -1,9 +1,9 @@
 dbs:
-  - path: /app/data/clock.db
+  - path: /app/data/clock-go.db
     replicas:
       - type: s3
-        bucket: clock-db
-        path: clock.db
+        bucket: clock-go-db
+        path: clock-go.db
         endpoint: ${MINIO_ENDPOINT}
         access-key-id: ${LITESTREAM_ACCESS_KEY_ID}
         secret-access-key: ${LITESTREAM_SECRET_ACCESS_KEY}
