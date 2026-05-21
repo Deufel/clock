@@ -1,11 +1,11 @@
 # syntax=docker/dockerfile:1
 # ---- Build stage ----
-FROM golang:1.24-bookworm AS builder
+FROM golang:1.25-bookworm AS builder
 
 WORKDIR /src
 
 # Install templ. Using a pinned recent version; bump as needed.
-RUN go install github.com/a-h/templ/cmd/templ@v0.3.819
+RUN go install github.com/a-h/templ/cmd/templ@v0.3.1020
 
 COPY go.mod ./
 # go.sum may be empty/missing on first build; that's fine — tidy will populate.
