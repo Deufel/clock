@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Deufel/clock-go/internal/auth"
-	"github.com/Deufel/clock-go/internal/state"
-	"github.com/Deufel/clock-go/web"
+	"github.com/Deufel/clock/internal/auth"
+	"github.com/Deufel/clock/internal/state"
+	"github.com/Deufel/clock/web"
 
 	"github.com/a-h/templ"
 	datastar "github.com/starfederation/datastar-go/datastar"
