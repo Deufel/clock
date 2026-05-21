@@ -85,7 +85,7 @@ templ ThemeControls() {
 // Landing — no shell, no SSE stream. Just a centered CTA.
 // ---------------------------------------------------------------------------
 
-templ Landing() {
+templ Landing(flash string) {
 	<!DOCTYPE html>
 	<html lang="en" data-ui-theme="dark">
 		<head>
@@ -98,6 +98,9 @@ templ Landing() {
 		<body class="stage">
 			<div class="hud-overlay" style="min-block-size: 100svh; padding: 2rem">
 				<div class="• column" style="align-items: center; gap: 1.5em; max-inline-size: 24rem">
+					if flash != "" {
+						<div class="tag inf" style="--type: -0.5">{ flash }</div>
+					}
 					<div class="row" style="align-items: center; gap: 0.6em; --type: 2">
 						@templ.Raw(LogoSVG)
 						<span>Timer</span>
