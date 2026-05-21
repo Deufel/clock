@@ -513,12 +513,11 @@ type subscriber struct {
 func NewHub() *Hub {
 	return &Hub{subscribers: make(map[*subscriber]struct{})}
 }
-
 // Subscribe registers a subscriber for topics that start with prefix (use
 // "tasks.{sid}." to receive any topic for one session). Returns a channel of
 // matched topic names and an unsubscribe func.
 func (h *Hub) Subscribe(prefix string) (<-chan string, func()) {
-	s := &subscriber{prefix: prefix, ch: make(chan string, 8)}
+	s := &subscriber{prefix: prefix, ch: make(chan string, 64)}
 	h.mu.Lock()
 	h.subscribers[s] = struct{}{}
 	h.mu.Unlock()
