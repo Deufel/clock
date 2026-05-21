@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Deufel/clock/internal/auth"
-	"github.com/Deufel/clock/internal/state"
-	"github.com/Deufel/clock/web"
+	"github.com/Deufel/clock-go/internal/auth"
+	"github.com/Deufel/clock-go/internal/state"
+	"github.com/Deufel/clock-go/web"
 
 	"github.com/a-h/templ"
 	datastar "github.com/starfederation/datastar-go/datastar"
@@ -122,7 +122,12 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/tasks", http.StatusFound)
 		return
 	}
-	templ.Handler(web.Landing()).ServeHTTP(w, r)
+	flash := ""
+	switch r.URL.Query().Get("reason") {
+	case "revoked":
+		flash = "You've been signed out."
+	}
+	templ.Handler(web.Landing(flash)).ServeHTTP(w, r)
 }
 
 func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
@@ -160,9 +165,12 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 
 	sse := datastar.NewSSE(w, r)
 
-	prefix := "tasks." + sid + "."
-	updates, unsub := s.Hub.Subscribe(prefix)
+	updates, unsub := s.Hub.Subscribe("tasks." + sid + ".")
 	defer unsub()
+
+	// Separate subscription for session-level events (revocation).
+	sessionEvents, unsubSession := s.Hub.Subscribe("session." + sid + ".")
+	defer unsubSession()
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
@@ -172,17 +180,62 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Slow keepalive heartbeat. caddy-docker-proxy can hold a connection
+	// open from the Go server's perspective after the browser has gone
+	// away. When the ticker is dormant (nothing tracking), no writes
+	// happen, and the dead connection never surfaces — leaving leaked
+	// subscribers + a leaked goroutine. Writing every 10s forces a write
+	// failure within ~10s of a real disconnect, so the handler returns
+	// and cleanup runs.
+	heartbeat := time.NewTicker(10 * time.Second)
+	defer heartbeat.Stop()
+
 	for {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-heartbeat.C:
+			// Re-render rather than write a raw SSE comment so we go
+			// through the Datastar SDK's writer path. The morph is a
+			// no-op when state is unchanged.
+			if err := s.pushUpdate(sse, sid); err != nil {
+				return
+			}
 		case _, ok := <-updates:
 			if !ok {
 				return
 			}
+			// Coalesce: drain any other pending events before rendering, so
+			// a burst of ticks becomes one render. The view is a pure
+			// function of state — rendering N times in a row would produce
+			// identical-or-near-identical output. One render at the end
+			// captures the latest state correctly.
+			drained := false
+			for !drained {
+				select {
+				case <-updates:
+					// discard
+				default:
+					drained = true
+				}
+			}
 			if err := s.pushUpdate(sse, sid); err != nil {
 				return
 			}
+		case ev, ok := <-sessionEvents:
+			if !ok {
+				return
+			}
+			// We only publish "session.{sid}.revoked" today; if more events
+			// are added later, switch on the topic name.
+			_ = ev
+			// Tell the browser to navigate to /logout, which clears its own
+			// device cookie and redirects to /. The SSE stream then ends
+			// naturally when the browser navigates away.
+			if err := sse.Redirect("/logout?reason=revoked"); err != nil {
+				return
+			}
+			return
 		}
 	}
 }
@@ -194,7 +247,21 @@ func (s *Server) pushUpdate(sse *datastar.ServerSentEventGenerator, sid string) 
 		log.Printf("pushUpdate get tasks: %v", err)
 		return err
 	}
-	return sse.PatchElementTempl(web.LiveRegion(tasks))
+	html, err := renderToString(web.LiveRegion(tasks))
+	if err != nil {
+		return err
+	}
+	return sse.PatchElements(html)
+}
+
+// renderToString runs a templ.Component to a string, suitable for passing to
+// Datastar's PatchElements / RemoveElement APIs which take raw HTML.
+func renderToString(c templ.Component) (string, error) {
+	var buf strings.Builder
+	if err := c.Render(context.Background(), &buf); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
 }
 
 // runTicker emits "tick" events at tickInterval while anyTracking(sid) is
@@ -230,9 +297,30 @@ func (s *Server) runTicker(ctx context.Context, sid string) {
 
 // ---- Commands --------------------------------------------------------------
 
+// taskBelongsToSession verifies that the task identified by id is owned by
+// sid. Returns true on match. Logs and returns false on any mismatch or DB
+// error — callers should respond 204 anyway to avoid leaking ID existence.
+func (s *Server) taskBelongsToSession(id int64, sid string) bool {
+	if id <= 0 || sid == "" {
+		return false
+	}
+	t, err := s.DB.GetTask(id)
+	if err != nil {
+		log.Printf("taskBelongsToSession lookup id=%d: %v", id, err)
+		return false
+	}
+	if t == nil {
+		return false
+	}
+	return t.SID == sid
+}
+
 func (s *Server) handleAdd(w http.ResponseWriter, r *http.Request) {
 	sid, _ := s.session(w, r)
 	name := strings.TrimSpace(r.URL.Query().Get("name"))
+	if len(name) > 200 {
+		name = name[:200]
+	}
 	if name != "" {
 		if _, err := s.DB.AddTask(sid, name); err != nil {
 			log.Printf("AddTask: %v", err)
@@ -250,8 +338,9 @@ func (s *Server) parseTaskID(r *http.Request) int64 {
 func (s *Server) handleTrack(w http.ResponseWriter, r *http.Request) {
 	sid, _ := s.session(w, r)
 	id := s.parseTaskID(r)
-	if id > 0 {
-		_ = s.DB.StopAllTracking(sid)
+	if s.taskBelongsToSession(id, sid) {
+		// Multiple tasks can be tracked simultaneously. Each task has its
+		// own track_start; the 60fps ticker re-renders all of them at once.
 		_ = s.DB.TaskStartTracking(id)
 		s.Hub.Publish("tasks." + sid + ".update")
 	}
@@ -261,7 +350,7 @@ func (s *Server) handleTrack(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	sid, _ := s.session(w, r)
 	id := s.parseTaskID(r)
-	if id > 0 {
+	if s.taskBelongsToSession(id, sid) {
 		_ = s.DB.TaskStopTracking(id)
 		s.Hub.Publish("tasks." + sid + ".update")
 	}
@@ -271,7 +360,7 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDone(w http.ResponseWriter, r *http.Request) {
 	sid, _ := s.session(w, r)
 	id := s.parseTaskID(r)
-	if id > 0 {
+	if s.taskBelongsToSession(id, sid) {
 		_ = s.DB.TaskComplete(id)
 		s.Hub.Publish("tasks." + sid + ".update")
 	}
@@ -282,7 +371,11 @@ func (s *Server) handleRename(w http.ResponseWriter, r *http.Request) {
 	sid, _ := s.session(w, r)
 	id := s.parseTaskID(r)
 	name := strings.TrimSpace(r.URL.Query().Get("name"))
-	if id > 0 && name != "" {
+	// Enforce a sane upper bound on task name length to prevent abuse.
+	if len(name) > 200 {
+		name = name[:200]
+	}
+	if name != "" && s.taskBelongsToSession(id, sid) {
 		_ = s.DB.RenameTask(id, name)
 		s.Hub.Publish("tasks." + sid + ".update")
 	}
@@ -353,8 +446,25 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	// Read the sid before clearing — we need it to broadcast.
+	sid := s.Signer.ReadSignedCookie(r, "sid")
+
 	auth.ClearCookie(w, "sid")
-	http.Redirect(w, r, "/", http.StatusFound)
+
+	// Broadcast revocation to any other open SSE streams for this session.
+	// Streams will see this event and navigate themselves to /logout, which
+	// will then clear their own device's cookie. The current device's
+	// cookie was already cleared above by ClearCookie.
+	if sid != "" {
+		s.Hub.Publish("session." + sid + ".revoked")
+	}
+
+	// "reason=revoked" lets the / page show a flash if it wants.
+	target := "/"
+	if r.URL.Query().Get("reason") == "revoked" {
+		target = "/?reason=revoked"
+	}
+	http.Redirect(w, r, target, http.StatusFound)
 }
 
 // ---- Admin / health --------------------------------------------------------
